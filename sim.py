@@ -1,0 +1,636 @@
+import datetime as dt
+import os
+import random
+from typing import Callable, Dict, List, Optional, Tuple
+
+from db import Database, Planet, StarSystem
+from llm import LLMClient
+
+
+class Simulation:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+        mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
+        self.llm = LLMClient(mode=mode)
+        self._init_seed()
+        self._ensure_universe()
+
+    def run_cycles(self, count: int = 1) -> int:
+        if count < 1:
+            return 0
+        cycles_completed = 0
+        for _ in range(count):
+            self._run_single_cycle()
+            cycles_completed += 1
+        return cycles_completed
+
+    def run_cycle_stream(
+        self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
+    ) -> int:
+        return self._run_single_cycle(stream_callback)
+
+    def _run_single_cycle(
+        self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
+    ) -> int:
+        cycle_id = self._create_cycle()
+        civ_context, civ_summaries = self._run_civ_turns(
+            cycle_id, stream_callback
+        )
+        effects_summary = self._apply_delayed_effects(cycle_id)
+        sim_context = f"{civ_context}\n{effects_summary}".strip()
+        events, llm_meta = self.llm.generate_events(cycle_id, sim_context)
+        if llm_meta:
+            self.db.add_ai_log(
+                "master",
+                None,
+                cycle_id,
+                "prompt",
+                llm_meta.prompt,
+            )
+            self.db.add_ai_log(
+                "master",
+                None,
+                cycle_id,
+                "assistant",
+                llm_meta.response or "LLM unavailable; no events generated.",
+            )
+        self._store_simulation_artifacts(cycle_id, events)
+        master_context = self._build_master_context(
+            civ_summaries, sim_context, events
+        )
+        self._run_master_narration(
+            cycle_id, master_context, stream_callback
+        )
+        return cycle_id
+
+    def _create_cycle(self) -> int:
+        now = dt.datetime.utcnow().isoformat() + "Z"
+        return self.db.add_cycle(now, now, "Cycle completed")
+
+    def _ensure_universe(self) -> None:
+        if self.db.universe_exists():
+            return
+        self._seed_universe()
+
+    def _seed_universe(self) -> None:
+        random.seed()
+        systems: List[StarSystem] = []
+        for i in range(10):
+            name = f"SYS-{i + 1:02d}"
+            x = random.uniform(0.1, 0.9)
+            y = random.uniform(0.1, 0.9)
+            system_id = self.db.add_system(name, x, y)
+            systems.append(StarSystem(system_id, name, x, y))
+
+        planet_pool: List[Planet] = []
+        for system in systems:
+            planet_count = random.randint(3, 8)
+            for p in range(planet_count):
+                orbit = round(0.3 + p * random.uniform(0.4, 0.9), 2)
+                size = round(random.uniform(0.6, 2.4), 2)
+                habitability = round(random.uniform(0.0, 1.0), 2)
+                kind = random.choice(
+                    ["rocky", "ocean", "ice", "desert", "gas", "jungle", "metallic"]
+                )
+                richness = round(random.uniform(0.0, 1.0), 2)
+                science = round(random.uniform(0.0, 1.0), 2)
+                name = f"{system.name}-P{p + 1}"
+                planet_id = self.db.add_planet(
+                    system.id,
+                    name,
+                    orbit,
+                    size,
+                    habitability,
+                    kind,
+                    richness,
+                    science,
+                )
+                planet_pool.append(
+                    Planet(
+                        planet_id,
+                        system.id,
+                        name,
+                        orbit,
+                        size,
+                        habitability,
+                        kind,
+                        richness,
+                        science,
+                    )
+                )
+
+        habitable = sorted(
+            planet_pool, key=lambda p: p.habitability, reverse=True
+        )[: random.randint(3, 4)]
+        prompt_planets = [(p.name, p.habitability) for p in habitable]
+        civs, llm_meta = self.llm.generate_civilizations(
+            prompt_planets, len(habitable)
+        )
+        if llm_meta:
+            self.db.add_ai_log(
+                "master",
+                None,
+                0,
+                "prompt",
+                llm_meta.prompt,
+            )
+            self.db.add_ai_log(
+                "master",
+                None,
+                0,
+                "assistant",
+                llm_meta.response or "LLM unavailable; fallback civs used.",
+            )
+        for planet, civ in zip(habitable, civs):
+            cohesion = round(random.uniform(0.4, 0.8), 2)
+            inequality = round(random.uniform(0.2, 0.7), 2)
+            eco_pressure = round(random.uniform(0.2, 0.7), 2)
+            innovation = round(random.uniform(0.2, 0.7), 2)
+            stability = round(random.uniform(0.3, 0.8), 2)
+            tech_stage = "stone"
+            civ_id = self.db.add_civilization(
+                civ.name,
+                civ.color,
+                planet.id,
+                "emerging",
+                "active",
+                cohesion,
+                inequality,
+                eco_pressure,
+                innovation,
+                stability,
+                tech_stage,
+                "",
+            )
+            self.db.add_ai_log(
+                "civ",
+                civ_id,
+                0,
+                "assistant",
+                f"Birth summary: {civ.summary}",
+            )
+
+    def _run_civ_turns(
+        self,
+        cycle_id: int,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> tuple[str, list]:
+        if self.llm.mode == "stub":
+            return "LLM disabled.", []
+        civs = self.db.list_civilizations()
+        systems = {s.id: s for s in self.db.list_systems()}
+        planets = {p.id: p for p in self.db.list_planets()}
+        civ_summaries = []
+        for civ in civs:
+            stats = self._advance_civ_stats(civ)
+            self.db.update_civilization(
+                civ.id,
+                cohesion=stats["cohesion"],
+                inequality=stats["inequality"],
+                eco_pressure=stats["eco_pressure"],
+                innovation=stats["innovation"],
+                stability=stats["stability"],
+                tech_stage=stats["tech_stage"],
+                memory_long=stats["memory_long"],
+            )
+            planet = planets.get(civ.home_planet_id)
+            system = systems.get(planet.system_id) if planet else None
+            recent_logs = self.db.list_ai_logs("civ", civ.id, limit=2)
+            context_lines = [
+                f"Status: {civ.status}. Tech level: {civ.level}.",
+                f"Tech stage: {stats['tech_stage']}.",
+                (
+                    "Stats: cohesion={coh:.2f}, inequality={ineq:.2f}, "
+                    "eco_pressure={eco:.2f}, innovation={inn:.2f}, stability={stab:.2f}."
+                ).format(
+                    coh=stats["cohesion"],
+                    ineq=stats["inequality"],
+                    eco=stats["eco_pressure"],
+                    inn=stats["innovation"],
+                    stab=stats["stability"],
+                ),
+                f"Long memory: {stats['memory_long']}",
+            ]
+            if system:
+                context_lines.append(
+                    f"Home system: {system.name} at ({system.x:.2f}, {system.y:.2f})."
+                )
+            if planet:
+                context_lines.append(
+                    f"Home planet: {planet.name}, orbit {planet.orbit_au:.2f} AU, "
+                    f"size {planet.size:.2f}, habitability {planet.habitability:.2f}."
+                )
+            if recent_logs:
+                short = " | ".join(log.message for log in reversed(recent_logs))
+                context_lines.append(f"Recent memory: {short}")
+            context = "\n".join(context_lines)
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_start",
+                    "scope": "civ",
+                    "civ_id": str(civ.id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                },
+            )
+            result = self.llm.generate_civ_thought(
+                civ.name,
+                cycle_id,
+                context,
+                on_chunk=lambda chunk, civ_id=civ.id: self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_chunk",
+                        "scope": "civ",
+                        "civ_id": str(civ_id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "chunk": chunk,
+                    },
+                ),
+            )
+            if not result:
+                self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_chunk",
+                        "scope": "civ",
+                        "civ_id": str(civ.id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "chunk": "LLM unavailable.",
+                    },
+                )
+                self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_end",
+                        "scope": "civ",
+                        "civ_id": str(civ.id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "message": "LLM unavailable.",
+                    },
+                )
+                continue
+            updates = result.updates
+            if updates:
+                name = updates.get("name")
+                color = updates.get("color")
+                level = updates.get("level")
+                status = updates.get("status")
+                if color and not self._valid_hex_color(color):
+                    color = None
+                self.db.update_civilization(
+                    civ.id,
+                    name=name,
+                    color=color,
+                    level=level,
+                    status=status,
+                )
+            new_memory = self._build_long_memory(civ, stats, result.log)
+            self.db.update_civilization(civ.id, memory_long=new_memory)
+            civ_name = updates.get("name") if updates else None
+            if not civ_name:
+                civ_name = civ.name
+            self.db.add_ai_log("civ", civ.id, cycle_id, "prompt", result.prompt)
+            self.db.add_ai_log(
+                "civ", civ.id, cycle_id, "assistant", result.log
+            )
+            if result.god:
+                self.db.add_ai_log("civ", civ.id, cycle_id, "god", result.god)
+            civ_summaries.append(
+                {
+                    "civ": civ_name,
+                    "log": result.log,
+                    "god": result.god,
+                    "updates": updates,
+                }
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "civ",
+                    "civ_id": str(civ.id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": result.log,
+                },
+            )
+        civ_context = self._build_civ_context(civs, civ_summaries)
+        return civ_context, civ_summaries
+
+    def _run_master_narration(
+        self,
+        cycle_id: int,
+        master_context: str,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> None:
+        self._emit_stream(
+            stream_callback,
+            {
+                "type": "log_start",
+                "scope": "master",
+                "civ_id": "",
+                "cycle": str(cycle_id),
+                "role": "assistant",
+            },
+        )
+        master = self.llm.generate_master_log(
+            cycle_id,
+            master_context,
+            on_chunk=lambda chunk: self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": chunk,
+                },
+            ),
+        )
+        if master:
+            self.db.add_ai_log("master", None, cycle_id, "prompt", master.prompt)
+            self.db.add_ai_log("master", None, cycle_id, "assistant", master.log)
+            self.db.add_ai_log("master", None, cycle_id, "analysis", master.analysis)
+            if master.god:
+                self.db.add_ai_log("master", None, cycle_id, "god", master.god)
+            self.db.update_cycle_summary(cycle_id, master.title)
+            self.db.add_event(
+                cycle_id,
+                "cycle",
+                master.title,
+                master.log,
+                {"analysis": master.analysis, "god": master.god},
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": master.log,
+                },
+            )
+        else:
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": "LLM unavailable.",
+                },
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": "LLM unavailable.",
+                },
+            )
+            self.db.update_cycle_summary(cycle_id, f"Cycle {cycle_id}")
+            self.db.add_event(
+                cycle_id,
+                "cycle",
+                f"Cycle {cycle_id}",
+                "No master response available.",
+                {},
+            )
+
+    def _summarize_tech_levels(self, civs) -> str:
+        if not civs:
+            return "none"
+        stages = [str(civ.tech_stage).lower() for civ in civs]
+        levels = [str(civ.level).lower() for civ in civs]
+        if any(k in st for st in stages for k in ("space", "atomic", "interstellar")):
+            if any(k in st for st in stages for k in ("interstellar", "stellar")):
+                return "interstellar (multi-system possible)"
+            return "spacefaring (within-system only)"
+        if any(k in lvl for lvl in levels for k in ("interstellar", "stellar", "ftl")):
+            return "interstellar (multi-system possible)"
+        if any(k in lvl for lvl in levels for k in ("space", "orbital", "spacefaring")):
+            return "spacefaring (within-system only)"
+        return "pre-space (planetary only)"
+
+    def _build_civ_context(self, civs, civ_summaries) -> str:
+        master_context = f"Total civilizations: {len(civs)}."
+        tech_summary = self._summarize_tech_levels(civs)
+        master_context += f"\nTech capability: {tech_summary}"
+        master_context += f"\nInnovation climate: {self._innovation_climate(civs)}"
+        if civ_summaries:
+            master_context += "\nCivilization responses:\n"
+            for summary in civ_summaries:
+                master_context += (
+                    f"- {summary['civ']}: log={summary['log']} | "
+                    f"god={summary['god']} | updates={summary['updates']}\n"
+                )
+        return master_context
+
+    def _build_master_context(
+        self, civ_summaries, sim_context: str, events: list
+    ) -> str:
+        lines = [sim_context, ""]
+        if events:
+            lines.append("Simulation events:")
+            for event in events:
+                lines.append(f"- {event.kind}: {event.title}")
+        return "\n".join(lines)
+
+    def _store_simulation_artifacts(self, cycle_id: int, events: list) -> None:
+        for event in events:
+            self.db.add_event(
+                cycle_id,
+                event.kind,
+                event.title,
+                event.detail,
+                event.metadata,
+            )
+            self._handle_event_metadata(cycle_id, event.metadata)
+
+    def _handle_event_metadata(self, cycle_id: int, metadata: dict) -> None:
+        if not isinstance(metadata, dict):
+            return
+        delayed = metadata.get("delayed_effects", [])
+        for item in delayed:
+            if not isinstance(item, dict):
+                continue
+            delay = int(item.get("cycle_delay", 0) or 0)
+            due = cycle_id + max(1, delay)
+            civ_id = self._resolve_civ(item.get("civ"))
+            kind = str(item.get("kind", "effect"))
+            payload = item.get("delta", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            self.db.add_delayed_effect(due, civ_id, kind, payload)
+        marks = metadata.get("world_marks", [])
+        for item in marks:
+            if not isinstance(item, dict):
+                continue
+            civ_id = self._resolve_civ(item.get("civ"))
+            label = str(item.get("label", "mark"))
+            impact = str(item.get("impact", ""))
+            self.db.add_world_mark(cycle_id, civ_id, label, impact)
+
+    def _resolve_civ(self, value) -> Optional[int]:
+        if value is None:
+            return None
+        civs = self.db.list_civilizations()
+        if isinstance(value, int):
+            for civ in civs:
+                if civ.id == value:
+                    return civ.id
+        name = str(value).strip()
+        for civ in civs:
+            if civ.name == name:
+                return civ.id
+        return None
+
+    def _apply_delayed_effects(self, cycle_id: int) -> str:
+        effects = self.db.list_due_effects(cycle_id)
+        if not effects:
+            return "Delayed effects: none."
+        summaries = []
+        for effect in effects:
+            self._apply_effect(effect)
+            self.db.delete_delayed_effect(effect.id)
+            target = f"CIV{effect.civ_id}" if effect.civ_id else "global"
+            summaries.append(f"{target}:{effect.kind}")
+        return "Delayed effects applied: " + ", ".join(summaries)
+
+    def _apply_effect(self, effect) -> None:
+        delta = effect.payload if isinstance(effect.payload, dict) else {}
+        civ_id = effect.civ_id
+        if civ_id is None:
+            return
+        civs = {civ.id: civ for civ in self.db.list_civilizations()}
+        civ = civs.get(civ_id)
+        if not civ:
+            return
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+        cohesion = clamp(civ.cohesion + float(delta.get("cohesion", 0.0)))
+        inequality = clamp(civ.inequality + float(delta.get("inequality", 0.0)))
+        eco = clamp(civ.eco_pressure + float(delta.get("eco_pressure", 0.0)))
+        innovation = clamp(civ.innovation + float(delta.get("innovation", 0.0)))
+        stability = clamp(civ.stability + float(delta.get("stability", 0.0)))
+        self.db.update_civilization(
+            civ_id,
+            cohesion=cohesion,
+            inequality=inequality,
+            eco_pressure=eco,
+            innovation=innovation,
+            stability=stability,
+        )
+
+    def _init_seed(self) -> None:
+        existing = self.db.get_setting("seed")
+        if existing:
+            random.seed(int(existing))
+            return
+        seed = random.randint(100000, 999999)
+        self.db.set_setting("seed", str(seed))
+        random.seed(seed)
+
+    def _advance_civ_stats(self, civ) -> dict:
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        drift = random.uniform(-0.03, 0.03)
+        cohesion = clamp(civ.cohesion + drift - civ.inequality * 0.02)
+        inequality = clamp(civ.inequality + random.uniform(-0.02, 0.04))
+        eco_pressure = clamp(civ.eco_pressure + random.uniform(-0.02, 0.05))
+        innovation = clamp(civ.innovation + random.uniform(-0.02, 0.04))
+        stability = clamp(civ.stability + (cohesion - inequality) * 0.02)
+
+        tech_stage = self._maybe_advance_stage(
+            civ.tech_stage, innovation, stability
+        )
+        memory_long = civ.memory_long or "Seeded culture, early myths forming."
+        return {
+            "cohesion": cohesion,
+            "inequality": inequality,
+            "eco_pressure": eco_pressure,
+            "innovation": innovation,
+            "stability": stability,
+            "tech_stage": tech_stage,
+            "memory_long": memory_long,
+        }
+
+    def _maybe_advance_stage(
+        self, stage: str, innovation: float, stability: float
+    ) -> str:
+        stages = [
+            "stone",
+            "bronze",
+            "iron",
+            "classical",
+            "industrial",
+            "atomic",
+            "space",
+            "interstellar",
+        ]
+        if stage not in stages:
+            return stage
+        idx = stages.index(stage)
+        if idx >= len(stages) - 1:
+            return stage
+        chance = 0.01 + innovation * 0.06 + stability * 0.03
+        if random.random() < chance:
+            return stages[idx + 1]
+        return stage
+
+    def _build_long_memory(self, civ, stats: dict, log: str) -> str:
+        core = (
+            f"Traits: coh={stats['cohesion']:.2f}, ineq={stats['inequality']:.2f}, "
+            f"eco={stats['eco_pressure']:.2f}, inn={stats['innovation']:.2f}, "
+            f"stab={stats['stability']:.2f}, stage={stats['tech_stage']}."
+        )
+        log_trim = log.replace("\n", " ")
+        if len(log_trim) > 180:
+            log_trim = log_trim[:177] + "..."
+        return f"{core} Canon: {log_trim}"
+
+    def _innovation_climate(self, civs) -> str:
+        if not civs:
+            return "dormant"
+        good_status = ("stable", "prosper", "golden", "unified", "calm")
+        for civ in civs:
+            if any(k in str(civ.status).lower() for k in good_status):
+                return "propitious"
+            last = self.db.list_ai_logs("civ", civ.id, limit=1)
+            if last and any(
+                k in last[0].message.lower()
+                for k in ("research", "science", "education", "infrastructure")
+            ):
+                return "propitious"
+        return "volatile"
+
+    def _valid_hex_color(self, value: str) -> bool:
+        if not value.startswith("#") or len(value) != 7:
+            return False
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            return False
+        return True
+
+    def _emit_stream(
+        self,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+        payload: Dict[str, str],
+    ) -> None:
+        if stream_callback:
+            stream_callback(payload)
