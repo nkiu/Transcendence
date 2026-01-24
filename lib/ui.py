@@ -6,6 +6,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
+from typing import Optional, Tuple
 
 from lib.db import Event
 from lib.sim import Simulation
@@ -579,35 +580,27 @@ class AppUI(UITabsMixin, tk.Frame):
         self._show_system_info(system_id)
 
     def _build_comm_links(self, events):
-        systems = self.sim.db.list_systems()
-        if len(systems) < 2:
-            return []
         links = []
         kinds = {"contact", "conflict", "alliance", "trade", "war"}
         for event in events[:12]:
             if event.kind not in kinds:
                 continue
-            a = event.id % len(systems)
-            b = (event.id * 7 + 3) % len(systems)
-            if a == b:
-                b = (b + 1) % len(systems)
-            links.append((systems[a].id, systems[b].id, event.kind))
+            pair = self._event_link_systems(event)
+            if not pair:
+                continue
+            links.append((pair[0], pair[1], event.kind))
         return links
 
     def _build_persistent_links(self, events):
-        systems = self.sim.db.list_systems()
-        if len(systems) < 2:
-            return []
         links = {}
         kinds = {"alliance", "trade", "conflict", "war"}
         for event in events:
             if event.kind not in kinds:
                 continue
-            a = event.id % len(systems)
-            b = (event.id * 7 + 3) % len(systems)
-            if a == b:
-                b = (b + 1) % len(systems)
-            key = tuple(sorted((systems[a].id, systems[b].id)))
+            pair = self._event_link_systems(event)
+            if not pair:
+                continue
+            key = tuple(sorted(pair))
             if key not in links:
                 links[key] = event.kind
         return [(key[0], key[1], kind) for key, kind in links.items()]
@@ -617,9 +610,10 @@ class AppUI(UITabsMixin, tk.Frame):
         color = self.theme["accent"]
         for event in events[:6]:
             if event.kind in ("war", "conflict"):
-                alert = f"Alert: {event.kind.upper()}"
-                color = self.theme["danger"]
-                break
+                if self._event_link_systems(event):
+                    alert = f"Alert: {event.kind.upper()}"
+                    color = self.theme["danger"]
+                    break
             if event.kind == "anomaly":
                 alert = "Alert: ANOMALY DETECTED"
                 color = self.theme["accent_alt"]
@@ -630,6 +624,44 @@ class AppUI(UITabsMixin, tk.Frame):
                 break
         self._alert_text = alert
         self._alert_color = color
+
+    def _event_link_systems(self, event) -> Optional[Tuple[int, int]]:
+        meta = event.metadata if isinstance(event.metadata, dict) else {}
+        system_ids = meta.get("system_ids") or meta.get("systems")
+        if isinstance(system_ids, (list, tuple)) and len(system_ids) >= 2:
+            try:
+                a = int(system_ids[0])
+                b = int(system_ids[1])
+            except (TypeError, ValueError):
+                return None
+            if a != b:
+                return (a, b)
+            return None
+        civ_ids = meta.get("civ_ids") or meta.get("civs") or meta.get("participants")
+        if isinstance(civ_ids, (list, tuple)) and len(civ_ids) >= 2:
+            try:
+                civ_a = int(civ_ids[0])
+                civ_b = int(civ_ids[1])
+            except (TypeError, ValueError):
+                return None
+            a = self._civ_systems.get(civ_a)
+            b = self._civ_systems.get(civ_b)
+            if a and b and a != b:
+                return (a, b)
+        return None
+
+    def _event_target_system(self, event) -> Optional[int]:
+        meta = event.metadata if isinstance(event.metadata, dict) else {}
+        if meta.get("scope") != "civ":
+            return None
+        target = meta.get("target")
+        if target is None:
+            return None
+        try:
+            civ_id = int(target)
+        except (TypeError, ValueError):
+            return None
+        return self._civ_systems.get(civ_id)
 
     def _draw_comm_links(self, systems) -> None:
         if not self._comm_links:
@@ -1000,11 +1032,10 @@ class AppUI(UITabsMixin, tk.Frame):
         self._pulse_at(pos[0], pos[1], self.theme["accent_alt"])
 
     def _pulse_from_events(self, events, count: int) -> None:
-        systems = list(self._system_positions.keys())
-        if not systems:
-            return
         for event in events[:count]:
-            system_id = systems[event.id % len(systems)]
+            system_id = self._event_target_system(event)
+            if not system_id:
+                continue
             pos = self._system_positions.get(system_id)
             if pos:
                 color = (
