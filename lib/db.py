@@ -123,7 +123,7 @@ class Database:
         self.path = path
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._init_schema()
 
     def _init_schema(self) -> None:
