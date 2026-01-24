@@ -3,7 +3,8 @@
 A tiny, living universe you can **watch**.  
 Procedural star systems, emergent civilizations, and a Game Master AI narrating what unfolds.
 
-This project is deliberately playful and exploratory: a sandbox where you observe, export, and study the stories your mini‑cosmos invents.
+This project is deliberately playful and exploratory: a sandbox where you observe, export, and study the stories your mini‑cosmos invents.  
+It is closer to an **LLM experiment** than a traditional simulator or game — the point is to see how models improvise world dynamics they were never trained to simulate.
 
 ## What it does
 
@@ -85,17 +86,20 @@ LLMs are great at narrative flavor but can drift or invent state. This project k
 - Hidden stats and tech stages to stabilize continuity
 - Strict JSON outputs for simulation steps
 - Master narration that reflects simulation rather than rewriting it
+- Room for noise and mistakes as part of the experiment
 
 ## Design philosophy
 
 - **Fun over perfection** — weirdness is a feature.
 - **Exploration first** — observe, export, analyze.
+- **Experiment, not simulation** — this is about LLM behavior, not realism.
 - **Small, readable codebase** — tweak and iterate fast.
 
 ## Roadmap ideas
 
 - Deeper simulation vs narration separation
 - Better tech pacing + rare breakthroughs
+- Optional non‑LLM “classic” AI systems (later, maybe)
 - Optional player interventions (“oracle” mode)
 
 ## License
