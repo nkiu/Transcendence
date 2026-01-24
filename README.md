@@ -13,6 +13,7 @@ This project is deliberately playful and exploratory: a sandbox where you observ
 - Displays a sci‑fi control panel UI (Tkinter) with live logs and visuals
 - Exports full simulation snapshots to `.txt`
 - Supports player directives that influence the next cycle
+- Includes a Chaotic AI layer that biases trajectories without “villains”
 
 ## LLM roles (who does what)
 
@@ -44,7 +45,8 @@ All key prompts are editable from the **Prompts** tab on the start screen:
 - Master narration
 
 These prompts are stored per save in SQLite and reloaded automatically when you **Load Game**.
-Defaults live in `prompts_design.py` and can be edited before starting a new run.
+Defaults live in `prompts_design.py`, with alternate versions (e.g. `prompt_design_v2.py`).
+You can choose the prompt set at start, or keep the saved prompts from the DB.
 
 ## Player directives
 
@@ -64,6 +66,7 @@ You can inject a one‑off directive into the next cycle:
 - **World tab**: scars, delayed effects, run settings
 - **Chaos tab**: chaotic profile logs (separate from Master view)
 - **Player directive**: queued input applied at next cycle
+- **Loading screen**: non‑blocking initialization for new runs
 
 ## Snapshot export
 
@@ -74,6 +77,14 @@ YYYYMMDD_HHMMSS_<game>_cycle<N>.txt
 ```
 
 Includes cycles, systems, planets, civilizations, events, AI logs, world marks, delayed effects, chaos profiles, and run settings.
+
+## Notes on simulation quality
+
+LLMs are great at narrative flavor but can drift or invent state. This project keeps:
+
+- Hidden stats and tech stages to stabilize continuity
+- Strict JSON outputs for simulation steps
+- Master narration that reflects simulation rather than rewriting it
 
 ## Design philosophy
 
