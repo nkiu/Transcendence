@@ -252,6 +252,8 @@ class LLMClient:
             if cleaned.startswith("```"):
                 cleaned = cleaned.strip("`")
             data = json.loads(cleaned)
+            if isinstance(data, dict):
+                data = data.get("civilizations") or data.get("civs")
             if not isinstance(data, list):
                 return None
             civs = []
@@ -266,7 +268,28 @@ class LLMClient:
                 return civs
             return None
         except json.JSONDecodeError:
-            return None
+            # Fallback: try to extract a JSON array from mixed output.
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start == -1 or end == -1 or end <= start:
+                return None
+            try:
+                data = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                return None
+            if isinstance(data, dict):
+                data = data.get("civilizations") or data.get("civs")
+            if not isinstance(data, list):
+                return None
+            civs = []
+            for item in data[:count]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip() or "Unnamed"
+                color = str(item.get("color", "")).strip() or self._rand_color()
+                summary = str(item.get("summary", "")).strip() or "No summary."
+                civs.append(CivSeed(name=name, color=color, summary=summary))
+            return civs if civs else None
 
     def _parse_events_json(self, raw: str) -> Optional[List[GeneratedEvent]]:
         try:
