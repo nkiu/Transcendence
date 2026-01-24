@@ -228,8 +228,12 @@ class StarTrekLiteRuleset(HarshRealismRuleset):
 
     def modify_weights(self, civ: CivilizationState, universe: UniverseState, eligible_events):
         weights = [event.weight_base for event in eligible_events]
-        stable = civ.stats.stability >= 0.60 and civ.stats.cohesion >= 0.60
-        crisis = self.is_in_crisis(civ, universe)
+        if civ is None:
+            stable = False
+            crisis = False
+        else:
+            stable = civ.stats.stability >= 0.60 and civ.stats.cohesion >= 0.60
+            crisis = self.is_in_crisis(civ, universe)
         destructive = {"war", "plague", "famine", "disaster", "collapse", "shock"}
         constructive = {"reform", "infrastructure", "education", "health", "trade", "diplomacy"}
         for idx, event in enumerate(eligible_events):
