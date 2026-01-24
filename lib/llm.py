@@ -170,6 +170,7 @@ class LLMClient:
         if self.mode == "stub":
             return "", 0
         start = time.monotonic()
+        max_duration = int(os.environ.get("OLLAMA_CALL_TIMEOUT", "240"))
         data = json.dumps(
             {"model": self.model, "prompt": prompt, "stream": True}
         ).encode("utf-8")
@@ -183,6 +184,8 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=45) as resp:
                 for raw in resp:
+                    if time.monotonic() - start > max_duration:
+                        break
                     if not raw:
                         continue
                     try:

@@ -418,18 +418,27 @@ class AppUI(UITabsMixin, tk.Frame):
         self._worker_thread.start()
 
     def _run_loop(self) -> None:
+        def _sleep_with_stop(seconds: float) -> None:
+            end = time.time() + seconds
+            while time.time() < end:
+                if self._stop:
+                    return
+                time.sleep(0.1)
+
         while not self._stop:
             if self.is_running:
                 if self.sim.is_ended():
                     self.is_running = False
                     self.status_var.set("Universe ended: No signals detected.")
-                    time.sleep(0.2)
+                    _sleep_with_stop(0.2)
                     continue
                 self.sim.run_cycle_stream(self._enqueue_stream)
                 self.queue.put({"type": "cycle_complete"})
-                time.sleep(self.cycle_interval_ms / 1000.0)
+                if self._stop:
+                    break
+                _sleep_with_stop(self.cycle_interval_ms / 1000.0)
             else:
-                time.sleep(0.2)
+                _sleep_with_stop(0.2)
 
     def _enqueue_stream(self, payload) -> None:
         self.queue.put(payload)
