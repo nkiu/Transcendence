@@ -222,6 +222,9 @@ class AppUI(UITabsMixin, tk.Frame):
         self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.chaos_tab, text="Rules")
 
+        self.errors_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.errors_tab, text="Errors")
+
 
         player_row = tk.Frame(right, bg=self.theme["panel_alt"])
         player_row.pack(fill="x", pady=(0, 6))
@@ -813,6 +816,7 @@ class AppUI(UITabsMixin, tk.Frame):
             self.after(100, self._wait_for_worker)
             return
         try:
+            self._export_snapshot()
             self.sim.db.set_setting(
                 "last_cycle", str(self.sim.db.get_latest_cycle_id())
             )

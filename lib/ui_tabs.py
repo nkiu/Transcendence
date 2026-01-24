@@ -224,12 +224,24 @@ class UITabsMixin:
         text.insert(tk.END, "\n".join(lines))
         self.chaos_text = text
 
+    def _render_errors_tab(self, parent: tk.Frame) -> None:
+        for child in parent.winfo_children():
+            child.destroy()
+        parent.configure(bg=self.theme["panel"])
+        text = tk.Text(parent, wrap="word")
+        self._setup_text_widget(text)
+        text.pack(fill="both", expand=True)
+        logs = self.sim.db.list_ai_logs("error", None, limit=200)
+        self._insert_logs(text, list(reversed(logs)))
+
     def _refresh_info_tabs(self, civs) -> None:
         if not hasattr(self, "stats_tab"):
             return
         self._render_stats_tab(self.stats_tab, civs)
         self._render_world_tab(self.world_tab)
         self._render_chaos_tab(self.chaos_tab)
+        if hasattr(self, "errors_tab"):
+            self._render_errors_tab(self.errors_tab)
 
     def _draw_sparkline(self, canvas: tk.Canvas, civ_id: int, latest_cycle: int) -> None:
         logs = self.sim.db.list_ai_logs("civ", civ_id, limit=60)
