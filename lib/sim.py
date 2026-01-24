@@ -2,7 +2,7 @@ import datetime as dt
 import json
 import os
 import random
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from lib.db import Database, Planet, StarSystem
 from lib.llm import LLMClient
@@ -1602,6 +1602,83 @@ class Simulation:
         if random.random() < chance:
             return stages[idx + 1]
         return stage
+
+
+def build_obituary_context(db_or_snapshot: Any) -> Dict[str, object]:
+    db = getattr(db_or_snapshot, "db", db_or_snapshot)
+    if not isinstance(db, Database):
+        raise TypeError("build_obituary_context expects a Database or Simulation")
+
+    end_cycle = db.get_latest_cycle_id()
+    civs = db.list_civilizations()
+    civ_entries = []
+    context_lines = [
+        "Universe obituary context (facts only):",
+        f"Universe ended at cycle {end_cycle}.",
+        "",
+    ]
+
+    def _clean(text: str) -> str:
+        return " ".join(text.split())
+
+    def _truncate(text: str, limit: int = 240) -> str:
+        text = _clean(text)
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
+
+    for civ in civs:
+        extinct_cycle = civ.extinct_cycle
+        end_label = str(extinct_cycle) if extinct_cycle is not None else "end"
+        duration = int(extinct_cycle or end_cycle)
+        marks = db.list_marks(civ.id)[:6]
+
+        logs = db.list_ai_logs("civ", int(civ.id), limit=200)
+        logs = [log for log in reversed(logs) if log.role == "assistant"]
+        early_logs = logs[:2]
+        late_logs = logs[-4:] if logs else []
+
+        def _format_logs(items: List) -> List[str]:
+            formatted = []
+            for log in items:
+                snippet = _truncate(log.message)
+                formatted.append(f"(C{log.cycle}) {snippet}")
+            return formatted
+
+        early = _format_logs(early_logs)
+        late = _format_logs(late_logs)
+
+        civ_entries.append(
+            {
+                "id": civ.id,
+                "name": civ.name,
+                "duration": duration,
+                "end": end_label,
+                "marks": marks,
+                "early_logs": early,
+                "late_logs": late,
+            }
+        )
+
+        context_lines.append(f"CIVILIZATION: {civ.name}")
+        context_lines.append(f"DURATION: {duration} cycles")
+        context_lines.append(f"END: {end_label}")
+        context_lines.append(f"MARKS: {', '.join(marks) if marks else 'none'}")
+        context_lines.append("EARLY LOGS:")
+        if early:
+            for line in early:
+                context_lines.append(f"- {line}")
+        else:
+            context_lines.append("- none")
+        context_lines.append("FINAL LOGS:")
+        if late:
+            for line in late:
+                context_lines.append(f"- {line}")
+        else:
+            context_lines.append("- none")
+        context_lines.append("")
+
+    return {"context": "\n".join(context_lines).strip(), "civs": civ_entries}
 
     def _apply_breakthroughs(self, civ, stats: dict) -> dict:
         if stats["tech_stage"] == civ.tech_stage:

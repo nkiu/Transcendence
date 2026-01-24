@@ -145,6 +145,24 @@ class LLMClient:
             latency_ms=latency,
         )
 
+    def generate_obituaries(
+        self,
+        context: str,
+        template: Optional[str] = None,
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
+        prompt = self._render_template(template, context=context)
+        response, latency = self._call_ollama_stream(prompt, None)
+        if not response:
+            return None
+        return LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
+        )
+
     def _generate_stub(self, cycle: int) -> List[GeneratedEvent]:
         seeds = [
             ("discovery", "Ancient ruin mapped", "A survey drone mapped a buried city grid."),

@@ -6,10 +6,11 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from lib.db import Event
-from lib.sim import Simulation
+from lib.sim import Simulation, build_obituary_context
+from prompts.prompt_design_v4 import OBITUARY_PROMPT
 from lib.ui_tabs import UITabsMixin
 
 
@@ -48,6 +49,9 @@ class AppUI(UITabsMixin, tk.Frame):
         self._stop = False
         self._worker_thread = None
         self._layout_set = False
+        self._obituary_window = None
+        self._obituary_text = None
+        self._obituary_pending = False
         self._build()
         self._refresh_events()
         self._refresh_universe()
@@ -430,9 +434,9 @@ class AppUI(UITabsMixin, tk.Frame):
             if self.is_running:
                 if self.sim.is_ended():
                     self.is_running = False
-                    self.status_var.set("Universe ended: No signals detected.")
-                    _sleep_with_stop(0.2)
-                    continue
+                    self.queue.put({"type": "universe_ended"})
+                    self._stop = True
+                    break
                 self.sim.run_cycle_stream(self._enqueue_stream)
                 self.queue.put({"type": "cycle_complete"})
                 if self._stop:
@@ -455,6 +459,12 @@ class AppUI(UITabsMixin, tk.Frame):
             if payload.get("type") == "cycle_complete":
                 self._refresh_events()
                 self._refresh_civ_tabs()
+                continue
+            if payload.get("type") == "universe_ended":
+                self._handle_universe_end()
+                continue
+            if payload.get("type") == "obituaries_ready":
+                self._on_obituaries_ready(payload)
                 continue
             self._handle_log_stream(payload)
         if handled:
@@ -562,6 +572,167 @@ class AppUI(UITabsMixin, tk.Frame):
             text.see(tk.END)
             if scope == "civ" and civ_id:
                 self._pulse_civ(int(civ_id))
+
+    def _handle_universe_end(self) -> None:
+        if self._obituary_pending:
+            return
+        self._obituary_pending = True
+        self.status_var.set("Universe ended: generating obituaries.")
+        root = self.winfo_toplevel()
+        root.withdraw()
+        self.show_obituaries_window(
+            [
+                "The universe cooled.\n\n"
+                "No signals remain.\n\n"
+                "Once, there were civilizations here.\n"
+                "They did not know each other.\n"
+                "They did not reach the stars.\n"
+                "They endured, briefly.\n\n"
+                "Please wait, history being extracted from the ashes of the civilization..."
+            ]
+        )
+        threading.Thread(target=self._generate_obituaries, daemon=True).start()
+
+    def _generate_obituaries(self) -> None:
+        civ_entries = []
+        try:
+            data = build_obituary_context(self.sim.db)
+            civ_entries = data.get("civs", [])
+            context = str(data.get("context", ""))
+            result = self.sim.llm.generate_obituaries(
+                context,
+                template=OBITUARY_PROMPT,
+            )
+            raw = result.response.strip() if result and result.response else ""
+            blocks = self._parse_obituary_blocks(raw) if raw else None
+            if not blocks and raw:
+                blocks = [raw]
+            if not blocks:
+                blocks = self._fallback_obituaries(civ_entries)
+        except Exception:
+            blocks = self._fallback_obituaries(civ_entries) if civ_entries else [
+                "No obituary data available."
+            ]
+        self.queue.put({"type": "obituaries_ready", "blocks": blocks})
+
+    def _on_obituaries_ready(self, payload) -> None:
+        blocks = payload.get("blocks") or []
+        self.show_obituaries_window(blocks)
+
+    def _parse_obituary_blocks(self, raw: str) -> Optional[List[str]]:
+        if not raw.strip():
+            return None
+        blocks = []
+        current = []
+        for line in raw.splitlines():
+            if line.startswith("CIV:"):
+                if current:
+                    blocks.append("\n".join(current).strip())
+                    current = []
+                current.append(line.rstrip())
+                continue
+            if current:
+                current.append(line.rstrip())
+        if current:
+            blocks.append("\n".join(current).strip())
+        return blocks or None
+
+    def _fallback_obituaries(self, civ_entries: List[dict]) -> List[str]:
+        blocks = []
+        for civ in civ_entries:
+            name = civ.get("name", "Unknown")
+            duration = civ.get("duration", 0)
+            end = civ.get("end", "end")
+            marks = civ.get("marks", [])
+            early_logs = civ.get("early_logs", [])
+            late_logs = civ.get("late_logs", [])
+            if end == "end":
+                end_sentence = "survived until the end of the universe."
+            else:
+                end_sentence = f"ended at cycle {end}."
+            sentences = [
+                f"{name} persisted for {duration} cycles and {end_sentence}",
+                f"Final marks: {', '.join(marks) if marks else 'none recorded'}.",
+            ]
+            if early_logs:
+                sentences.append(f"Early records mention: \"{early_logs[0]}\".")
+            else:
+                sentences.append("Early records are missing.")
+            if late_logs:
+                sentences.append(f"Later records note: \"{late_logs[-1]}\".")
+            else:
+                sentences.append("Late records are missing.")
+            header = f"CIV: {name} | DURATION: {duration} cycles | END: {end}"
+            blocks.append(f"{header}\n{' '.join(sentences)}")
+        return blocks
+
+    def show_obituaries_window(self, text_blocks: List[str]) -> None:
+        root = self.winfo_toplevel()
+        if not self._obituary_window or not self._obituary_window.winfo_exists():
+            win = tk.Toplevel(root)
+            win.title("And this was Transcendence")
+            win.geometry("900x650")
+            win.configure(bg=self.theme["bg"])
+            header = tk.Label(
+                win,
+                text="And this was Transcendence",
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+                font=("Consolas", 14, "bold"),
+            )
+            header.pack(pady=(12, 4))
+            frame = tk.Frame(win, bg=self.theme["bg"])
+            frame.pack(fill="both", expand=True, padx=12, pady=12)
+            scrollbar = tk.Scrollbar(frame)
+            scrollbar.pack(side="right", fill="y")
+            text = tk.Text(
+                frame,
+                wrap="word",
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                insertbackground=self.theme["text"],
+                font=("Consolas", 11),
+                yscrollcommand=scrollbar.set,
+            )
+            text.pack(fill="both", expand=True)
+            scrollbar.config(command=text.yview)
+            actions = tk.Frame(win, bg=self.theme["bg"])
+            actions.pack(fill="x", padx=12, pady=(0, 12))
+            quit_btn = tk.Button(
+                actions,
+                text="Quit",
+                command=self._quit_from_obituaries,
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                activebackground=self.theme["panel"],
+                activeforeground=self.theme["text"],
+                relief="flat",
+                padx=12,
+                pady=6,
+            )
+            quit_btn.pack(side="right")
+            win.protocol("WM_DELETE_WINDOW", root.destroy)
+            self._obituary_window = win
+            self._obituary_text = text
+        text = self._obituary_text
+        if not text:
+            return
+        text.configure(state="normal")
+        text.delete("1.0", tk.END)
+        content = "\n\n".join(block.strip() for block in text_blocks if block).strip()
+        text.insert(tk.END, content or "No obituaries available.")
+        text.configure(state="disabled")
+
+    def _quit_from_obituaries(self) -> None:
+        try:
+            self._export_snapshot()
+            self.sim.db.set_setting(
+                "last_cycle", str(self.sim.db.get_latest_cycle_id())
+            )
+            self.sim.db.close()
+        except Exception:
+            pass
+        self.winfo_toplevel().destroy()
 
     def _on_canvas_resize(self, _event: tk.Event) -> None:
         self._seed_starfield()

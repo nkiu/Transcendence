@@ -69,3 +69,19 @@ MASTER_OBSERVER_PROMPT = (
     "Cycle {cycle} context (mechanical truth):\n"
     "{context}\n"
 )
+
+OBITUARY_PROMPT = (
+    "You are a neutral journalist writing short obituaries after a universe ends.\n"
+    "Use ONLY the facts in the context: names, durations, marks, log excerpts.\n"
+    "Do NOT invent events, causes, or outcomes. Do NOT add simulation logic.\n"
+    "Plain text only. No JSON, YAML, XML, or code blocks.\n\n"
+    "Required output format for each civilization:\n"
+    "CIV: <name> | DURATION: <N> cycles | END: <extinct_cycle or end>\n"
+    "<one paragraph, 4-6 sentences>\n\n"
+    "Rules:\n"
+    "- Narrative only, factual and concise.\n"
+    "- If facts are missing, say so explicitly.\n"
+    "- Never mention civilizations not in the context.\n\n"
+    "Context:\n"
+    "{context}\n"
+)
