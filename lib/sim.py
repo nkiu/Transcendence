@@ -185,6 +185,7 @@ class Simulation:
                     consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
                     consecutive_famine=civ.consecutive_famine,
                     consecutive_zero_stability=civ.consecutive_zero_stability,
+                    consecutive_good_cycles=civ.consecutive_good_cycles,
                 )
             )
         return civ_states
@@ -215,6 +216,7 @@ class Simulation:
                 consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
                 consecutive_famine=civ.consecutive_famine,
                 consecutive_zero_stability=civ.consecutive_zero_stability,
+                consecutive_good_cycles=civ.consecutive_good_cycles,
             )
             if not civ.alive:
                 if "Extinct" not in self.db.list_marks(int(civ.id)):
@@ -644,6 +646,7 @@ class Simulation:
                 health,
                 tech_stage,
                 "",
+                0,
                 0,
                 0,
                 0,
