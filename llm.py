@@ -53,26 +53,17 @@ class LLMClient:
         self.base_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
     def generate_events(
-        self, cycle: int, context: str
+        self,
+        cycle: int,
+        context: str,
+        template: Optional[str] = None,
     ) -> Tuple[List[GeneratedEvent], Optional[LLMResult]]:
         if self.mode != "ollama":
             return [], None
-        prompt = (
-            "You are an event engine for a living universe simulation. "
-            f"Cycle {cycle} context:\n{context}\n"
-            "Rules: events must be feasible given the tech capability in context. "
-            "Allow rare, plausible breakthroughs (e.g., first orbital mission) even if "
-            "pre-space, but do NOT jump to interstellar travel or resource routes like "
-            "helium-3 unless capability is explicitly interstellar. If spacefaring, "
-            "stay within a system. Only allow breakthrough leaps when "
-            "Innovation climate is propitious; include metadata.justification and "
-            "metadata.rarity for any breakthrough event. "
-            "Optional metadata fields: delayed_effects (list of {cycle_delay, civ, kind, delta}), "
-            "world_marks (list of {civ, label, impact}). "
-            "Return JSON list of 1-4 events. Each event must be an object with "
-            "keys: kind, title, detail, metadata. Titles must be specific and "
-            "reflect real effects (no generic labels). metadata must be a JSON object. "
-            "If no valid events should happen, return an empty JSON list []."
+        prompt = self._render_template(
+            template,
+            cycle=cycle,
+            context=context,
         )
         response = self._call_ollama_stream(prompt, None)
         if response:
@@ -82,15 +73,16 @@ class LLMClient:
         return [], LLMResult(prompt=prompt, response=response)
 
     def generate_civilizations(
-        self, planets: List[Tuple[str, float]], count: int
+        self,
+        planets: List[Tuple[str, float]],
+        count: int,
+        template: Optional[str] = None,
     ) -> Tuple[List[CivSeed], Optional[LLMResult]]:
-        prompt = (
-            "You are a science-fiction worldbuilder. Create unique civilizations "
-            f"for {count} planets. Planets (name, habitability 0-1):\n"
-        )
-        prompt += "\n".join([f"- {name} ({hab:.2f})" for name, hab in planets])
-        prompt += (
-            "\nReturn JSON list of objects with fields: name, color (hex), summary."
+        planets_list = "\n".join([f"- {name} ({hab:.2f})" for name, hab in planets])
+        prompt = self._render_template(
+            template,
+            count=count,
+            planets_list=planets_list,
         )
         response = self._call_ollama_stream(prompt, None)
         if response:
@@ -105,17 +97,16 @@ class LLMClient:
         cycle: int,
         context: str,
         on_chunk: Optional[Callable[[str], None]] = None,
+        prompt_seed: str = "",
+        template: Optional[str] = None,
     ) -> Optional[CivThought]:
-        prompt = (
-            f"You are the mind of the civilization '{civ_name}'. "
-            f"It is cycle {cycle}. Context:\n{context}\n"
-            "Return JSON only with keys: log, god, name, color, level, status. "
-            "The 'log' must be 3-6 sentences describing real effects, not generic titles. "
-            "The 'god' must be a short paragraph for the human observer. "
-            "Only include name/color/level/status if you want to update them. "
-            "Color must be hex (e.g. #ff8844). "
-            "Do not mention or assume knowledge about other civilizations."
+        prompt = self._render_template(
+            template,
+            civ_name=civ_name,
+            cycle=cycle,
+            context=context,
         )
+        prompt = self._append_seed(prompt, prompt_seed)
         response = self._call_ollama_stream(prompt, on_chunk)
         if not response:
             return None
@@ -141,16 +132,15 @@ class LLMClient:
         cycle: int,
         context: str,
         on_chunk: Optional[Callable[[str], None]] = None,
+        prompt_seed: str = "",
+        template: Optional[str] = None,
     ) -> Optional[MasterThought]:
-        prompt = (
-            "You are the Game Master AI observing a simulated universe. "
-            f"Cycle {cycle} summary context:\n{context}\n"
-            "Return JSON only with keys: title, log, god, analysis. "
-            "title must be a short, specific cycle name. "
-            "log must be 4-6 sentences describing the real effects. "
-            "analysis must explicitly analyze each civilization response. "
-            "god is a short paragraph for the human observer."
+        prompt = self._render_template(
+            template,
+            cycle=cycle,
+            context=context,
         )
+        prompt = self._append_seed(prompt, prompt_seed)
         response = self._call_ollama_stream(prompt, on_chunk)
         if not response:
             return None
@@ -350,6 +340,20 @@ class LLMClient:
             return {"title": title, "log": log, "god": god, "analysis": analysis}
         except json.JSONDecodeError:
             return None
+
+    def _append_seed(self, prompt: str, seed: str) -> str:
+        if not seed.strip():
+            return prompt
+        return f"{prompt}\n\nSeed instructions:\n{seed.strip()}\n"
+
+    def _render_template(self, template: Optional[str], **kwargs) -> str:
+        if template and template.strip():
+            try:
+                return template.format(**kwargs)
+            except KeyError:
+                return template
+        # Fallback minimal prompt to avoid empty calls.
+        return f"Cycle {kwargs.get('cycle', '')} context:\n{kwargs.get('context', '')}\n"
 
     def _fallback_civs(self, count: int) -> List[CivSeed]:
         civs = []
