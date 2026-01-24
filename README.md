@@ -12,6 +12,7 @@ This project is deliberately playful and exploratory: a sandbox where you observ
 - Uses a local LLM (Ollama) to drive events + narration
 - Displays a sci‑fi control panel UI (Tkinter) with live logs and visuals
 - Exports full simulation snapshots to `.txt`
+- Supports player directives that influence the next cycle
 
 ## LLM roles (who does what)
 
@@ -33,7 +34,7 @@ python app.py
 The start screen lets you enable Ollama and pick a model without any exports.
 If Ollama is off, the sim runs but produces minimal AI output.
 
-## Prompts and seeds
+## Prompts (editable per save)
 
 All key prompts are editable from the **Prompts** tab on the start screen:
 
@@ -43,6 +44,16 @@ All key prompts are editable from the **Prompts** tab on the start screen:
 - Master narration
 
 These prompts are stored per save in SQLite and reloaded automatically when you **Load Game**.
+Defaults live in `prompts_design.py` and can be edited before starting a new run.
+
+## Player directives
+
+You can inject a one‑off directive into the next cycle:
+
+- Type your instruction (e.g., “The people doubt their gods and abandon ritual”)
+- Choose a target civilization (or all)
+- The directive is enforced as a hard constraint in the next civ log
+
 
 ## What you can see
 
@@ -52,6 +63,7 @@ These prompts are stored per save in SQLite and reloaded automatically when you 
 - **Stats tab**: cohesion, inequality, eco pressure, innovation, stability
 - **World tab**: scars, delayed effects, run settings
 - **Chaos tab**: chaotic profile logs (separate from Master view)
+- **Player directive**: queued input applied at next cycle
 
 ## Snapshot export
 
