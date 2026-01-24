@@ -43,6 +43,8 @@ class AppUI(tk.Frame):
         self._civ_tab_ids = {}
         self._needs_init_message = True
         self._stop = False
+        self._worker_thread = None
+        self._layout_set = False
         self._build()
         self._refresh_events()
         self._refresh_universe()
@@ -50,6 +52,7 @@ class AppUI(tk.Frame):
         self._start_worker()
         self._process_queue()
         self.winfo_toplevel().protocol("WM_DELETE_WINDOW", self._quit_app)
+        self.after(100, self._set_layout_sashes)
 
     def _build(self) -> None:
         self._apply_theme()
@@ -114,29 +117,29 @@ class AppUI(tk.Frame):
         )
         quit_btn.pack(side="left", padx=4)
 
-        body = tk.PanedWindow(
+        self.body_pane = tk.PanedWindow(
             self,
             orient="horizontal",
             sashrelief="raised",
             bg=self.theme["bg"],
         )
-        body.pack(fill="both", expand=True, padx=12, pady=8)
+        self.body_pane.pack(fill="both", expand=True, padx=12, pady=8)
 
-        left = tk.Frame(body, bg=self.theme["bg"])
-        right = tk.Frame(body, bg=self.theme["bg"])
+        left = tk.Frame(self.body_pane, bg=self.theme["bg"])
+        right = tk.Frame(self.body_pane, bg=self.theme["bg"])
 
-        body.add(left, stretch="always")
-        body.add(right, stretch="always")
+        self.body_pane.add(left, stretch="always")
+        self.body_pane.add(right, stretch="always")
 
-        left_split = tk.PanedWindow(
+        self.left_split = tk.PanedWindow(
             left, orient="vertical", sashrelief="raised", bg=self.theme["bg"]
         )
-        left_split.pack(fill="both", expand=True)
+        self.left_split.pack(fill="both", expand=True)
 
-        panel_frame = tk.Frame(left_split, bg=self.theme["panel"])
-        map_frame = tk.Frame(left_split, bg=self.theme["bg"])
-        left_split.add(panel_frame, stretch="never")
-        left_split.add(map_frame, stretch="always")
+        panel_frame = tk.Frame(self.left_split, bg=self.theme["panel"])
+        map_frame = tk.Frame(self.left_split, bg=self.theme["bg"])
+        self.left_split.add(panel_frame, stretch="never")
+        self.left_split.add(map_frame, stretch="always")
 
         self.canvas = tk.Canvas(
             map_frame, background=self.theme["bg"], highlightthickness=0
@@ -170,7 +173,7 @@ class AppUI(tk.Frame):
             panel_frame,
             bg=self.theme["panel"],
             highlightthickness=0,
-            height=180,
+            height=200,
         )
         self.system_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.system_canvas.bind("<Motion>", self._on_system_hover)
@@ -219,29 +222,72 @@ class AppUI(tk.Frame):
         self._setup_text_widget(self.chaos_text)
         self.chaos_text.pack(fill="both", expand=True)
 
+        player_frame = tk.Frame(right, bg=self.theme["panel_alt"])
+        player_frame.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            player_frame,
+            text="PLAYER DIRECTIVE (next cycle)",
+            font=("Consolas", 9, "bold"),
+            bg=self.theme["panel_alt"],
+            fg=self.theme["accent_alt"],
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+        self.player_text = tk.Text(
+            player_frame,
+            height=2,
+            wrap="word",
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+            insertbackground=self.theme["accent"],
+        )
+        self.player_text.pack(fill="x", padx=8, pady=(0, 4))
+        row = tk.Frame(player_frame, bg=self.theme["panel_alt"])
+        row.pack(fill="x", padx=8, pady=(0, 6))
+        self.player_combo = ttk.Combobox(row, values=[], state="readonly", width=20)
+        self.player_combo.pack(side="left")
+        tk.Button(
+            row,
+            text="Queue",
+            command=self._queue_player_directive,
+            bg=self.theme["panel"],
+            fg=self.theme["accent"],
+            activebackground=self.theme["accent"],
+            activeforeground=self.theme["bg"],
+            highlightbackground=self.theme["panel"],
+        ).pack(side="left", padx=6)
+
         self.civ_tabs = ttk.Notebook(right)
         self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
 
+        events_pane = tk.PanedWindow(
+            right, orient="horizontal", sashrelief="raised", bg=self.theme["bg"]
+        )
+        events_pane.pack(fill="both", expand=True, pady=(8, 0))
+
+        events_left = tk.Frame(events_pane, bg=self.theme["bg"])
+        events_right = tk.Frame(events_pane, bg=self.theme["bg"])
+        events_pane.add(events_left, stretch="always")
+        events_pane.add(events_right, stretch="always")
+
         self.event_list = tk.Listbox(
-            right,
+            events_left,
             height=10,
             bg=self.theme["panel"],
             fg=self.theme["text"],
             selectbackground=self.theme["accent"],
             selectforeground=self.theme["bg"],
         )
-        self.event_list.pack(fill="both", expand=True, pady=(8, 0))
+        self.event_list.pack(fill="both", expand=True)
         self.event_list.bind("<<ListboxSelect>>", self._on_select)
 
         self.event_detail = tk.Text(
-            right,
+            events_right,
             wrap="word",
             height=10,
             bg=self.theme["panel"],
             fg=self.theme["text"],
             insertbackground=self.theme["accent"],
         )
-        self.event_detail.pack(fill="both", expand=True, pady=(8, 0))
+        self.event_detail.pack(fill="both", expand=True)
 
         footer = tk.Frame(self, bg=self.theme["bg"])
         footer.pack(fill="x", padx=12, pady=(0, 12))
@@ -317,8 +363,8 @@ class AppUI(tk.Frame):
         self.event_detail.insert(tk.END, "\n".join(lines))
 
     def _start_worker(self) -> None:
-        thread = threading.Thread(target=self._run_loop, daemon=True)
-        thread.start()
+        self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._worker_thread.start()
 
     def _run_loop(self) -> None:
         while not self._stop:
@@ -432,6 +478,7 @@ class AppUI(tk.Frame):
         self._refresh_civ_overview(civs)
         if hasattr(self, "info_tabs"):
             self._refresh_info_tabs(civs)
+        self._refresh_player_targets(civs)
 
     def _setup_text_widget(self, text: tk.Text) -> None:
         text.configure(
@@ -478,6 +525,9 @@ class AppUI(tk.Frame):
     def _handle_log_stream_to_widget(
         self, text: tk.Text, payload, scope: str, civ_id: str
     ) -> None:
+        if payload.get("type") == "status":
+            self.status_var.set(payload.get("message", ""))
+            return
         event_type = payload.get("type")
         cycle = payload.get("cycle", "?")
         role = payload.get("role", "assistant")
@@ -499,6 +549,7 @@ class AppUI(tk.Frame):
     def _on_canvas_resize(self, _event: tk.Event) -> None:
         self._seed_starfield()
         self._refresh_universe()
+        self._set_layout_sashes()
 
     def _on_canvas_click(self, event: tk.Event) -> None:
         items = self.canvas.find_closest(event.x, event.y)
@@ -722,6 +773,22 @@ class AppUI(tk.Frame):
             foreground=[("selected", self.theme["bg"])],
         )
 
+    def _set_layout_sashes(self) -> None:
+        try:
+            width = max(self.body_pane.winfo_width(), 1)
+            height_left = max(self.left_split.winfo_height(), 1)
+            if self._layout_set:
+                return
+            if width < 600 or height_left < 400:
+                return
+            left_width = int(width * 0.2)
+            self.body_pane.sash_place(0, left_width, 0)
+            top_height = int(height_left * 0.4)
+            self.left_split.sash_place(0, 0, top_height)
+            self._layout_set = True
+        except Exception:
+            return
+
     def _show_system_info(self, system_id: int) -> None:
         system = next(
             (s for s in self.sim.db.list_systems() if s.id == system_id), None
@@ -767,11 +834,49 @@ class AppUI(tk.Frame):
     def _quit_app(self) -> None:
         self.is_running = False
         self._stop = True
+        self.status_var.set("Shutting down…")
+        self._show_shutdown_overlay()
+        self._wait_for_worker()
+
+    def _wait_for_worker(self) -> None:
+        thread = self._worker_thread
+        if thread and thread.is_alive():
+            self.after(100, self._wait_for_worker)
+            return
         try:
+            self.sim.db.set_setting(
+                "last_cycle", str(self.sim.db.get_latest_cycle_id())
+            )
             self.sim.db.close()
         except Exception:
             pass
+        self._hide_shutdown_overlay()
         self.winfo_toplevel().destroy()
+
+    def _show_shutdown_overlay(self) -> None:
+        if hasattr(self, "_shutdown_overlay") and self._shutdown_overlay.winfo_exists():
+            return
+        overlay = tk.Toplevel(self)
+        overlay.title("Saving...")
+        overlay.geometry("320x120")
+        overlay.resizable(False, False)
+        overlay.transient(self.winfo_toplevel())
+        overlay.grab_set()
+        label = tk.Label(
+            overlay,
+            text=(
+                "Saving in progress...\n"
+                "Please wait (may take time if a LLM response is running)."
+            ),
+            font=("Consolas", 10),
+        )
+        label.pack(expand=True, padx=20, pady=20)
+        self._shutdown_overlay = overlay
+
+    def _hide_shutdown_overlay(self) -> None:
+        overlay = getattr(self, "_shutdown_overlay", None)
+        if overlay and overlay.winfo_exists():
+            overlay.destroy()
 
     def _render_system_view(self, system) -> None:
         data = self._system_view_data
@@ -1014,6 +1119,28 @@ class AppUI(tk.Frame):
         logs = self.sim.db.list_ai_logs("chaos", None, limit=120)
         self._insert_logs(text, list(reversed(logs)))
         self.chaos_text = text
+
+    def _refresh_player_targets(self, civs) -> None:
+        options = ["All civilizations"] + [civ.name for civ in civs]
+        if hasattr(self, "player_combo"):
+            self.player_combo.configure(values=options)
+            if not self.player_combo.get():
+                self.player_combo.set(options[0])
+
+    def _queue_player_directive(self) -> None:
+        if not hasattr(self, "player_text"):
+            return
+        text = self.player_text.get("1.0", tk.END).strip()
+        if not text:
+            return
+        target = self.player_combo.get().strip()
+        if target == "All civilizations":
+            target_key = "all"
+        else:
+            target_key = target
+        self.sim.db.set_setting("player_directive_text", text)
+        self.sim.db.set_setting("player_directive_target", target_key)
+        self.player_text.delete("1.0", tk.END)
 
     def _refresh_info_tabs(self, civs) -> None:
         tabs = self.info_tabs.tabs()
