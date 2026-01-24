@@ -182,9 +182,9 @@ class AppUI(tk.Frame):
         self.info_tabs = ttk.Notebook(right)
         self.info_tabs.pack(fill="x", expand=False, pady=(0, 6))
 
-        sys_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.sys_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_text = tk.Text(
-            sys_tab,
+            self.sys_tab,
             wrap="word",
             height=9,
             bg=self.theme["panel"],
@@ -193,10 +193,10 @@ class AppUI(tk.Frame):
         )
         self.info_text.pack(fill="both", expand=True)
         self.info_text.insert(tk.END, "Click a star system to inspect it.")
-        self.info_tabs.add(sys_tab, text="System")
+        self.info_tabs.add(self.sys_tab, text="System")
 
-        civ_tab = tk.Frame(self.info_tabs, bg=self.theme["panel_alt"])
-        overview = tk.Frame(civ_tab, bg=self.theme["panel_alt"])
+        self.civ_tab = tk.Frame(self.info_tabs, bg=self.theme["panel_alt"])
+        overview = tk.Frame(self.civ_tab, bg=self.theme["panel_alt"])
         overview.pack(fill="both", expand=True)
         self.overview_title = tk.Label(
             overview,
@@ -208,19 +208,22 @@ class AppUI(tk.Frame):
         self.overview_title.pack(anchor="w", padx=8, pady=(6, 2))
         self.civ_overview = tk.Frame(overview, bg=self.theme["panel_alt"])
         self.civ_overview.pack(fill="both", expand=True, padx=8, pady=(0, 6))
-        self.info_tabs.add(civ_tab, text="Civs")
+        self.info_tabs.add(self.civ_tab, text="Civs")
 
-        stats_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(stats_tab, text="Stats")
+        self.stats_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.stats_tab, text="Stats")
 
-        world_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(world_tab, text="World")
+        self.world_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.world_tab, text="World")
 
-        chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(chaos_tab, text="Chaos")
-        self.chaos_text = tk.Text(chaos_tab, wrap="word")
-        self._setup_text_widget(self.chaos_text)
-        self.chaos_text.pack(fill="both", expand=True)
+        self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.chaos_tab, text="Chaos")
+
+        self.live_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.live_tab, text="Master Live")
+        self.master_live_text = tk.Text(self.live_tab, wrap="word")
+        self._setup_text_widget(self.master_live_text)
+        self.master_live_text.pack(fill="both", expand=True)
 
         player_frame = tk.Frame(right, bg=self.theme["panel_alt"])
         player_frame.pack(fill="x", pady=(0, 6))
@@ -535,16 +538,26 @@ class AppUI(tk.Frame):
             text.insert(tk.END, f"[C{cycle}] {role}:\n", "header")
             text.see(tk.END)
             self._focus_llm_tab(scope, civ_id)
+            if scope == "master" and hasattr(self, "master_live_text"):
+                self.master_live_text.delete("1.0", tk.END)
+                self.master_live_text.insert(
+                    tk.END, f"[C{cycle}] Master AI streaming...\n", "header"
+                )
         elif event_type == "log_chunk":
             tag = role if role in ("prompt", "god", "analysis") else "assistant"
             text.insert(tk.END, payload.get("chunk", ""), tag)
             text.see(tk.END)
             self._focus_llm_tab(scope, civ_id)
+            if scope == "master" and hasattr(self, "master_live_text"):
+                self.master_live_text.insert(tk.END, payload.get("chunk", ""), tag)
+                self.master_live_text.see(tk.END)
         elif event_type == "log_end":
             text.insert(tk.END, "\n\n", "assistant")
             text.see(tk.END)
             if scope == "civ" and civ_id:
                 self._pulse_civ(int(civ_id))
+            if scope == "master" and hasattr(self, "master_live_text"):
+                self.master_live_text.insert(tk.END, "\n\n", "assistant")
 
     def _on_canvas_resize(self, _event: tk.Event) -> None:
         self._seed_starfield()
@@ -858,7 +871,7 @@ class AppUI(tk.Frame):
             return
         overlay = tk.Toplevel(self)
         overlay.title("Saving...")
-        overlay.geometry("320x120")
+        overlay.geometry("500x100")
         overlay.resizable(False, False)
         overlay.transient(self.winfo_toplevel())
         overlay.grab_set()
@@ -866,7 +879,8 @@ class AppUI(tk.Frame):
             overlay,
             text=(
                 "Saving in progress...\n"
-                "Please wait (may take time if a LLM response is running)."
+                "Please wait end of cycle!\n"
+                "(may take time if a LLM response is running)."
             ),
             font=("Consolas", 10),
         )
@@ -1143,18 +1157,11 @@ class AppUI(tk.Frame):
         self.player_text.delete("1.0", tk.END)
 
     def _refresh_info_tabs(self, civs) -> None:
-        tabs = self.info_tabs.tabs()
-        if len(tabs) < 5:
+        if not hasattr(self, "stats_tab"):
             return
-        stats_tab = tabs[2]
-        world_tab = tabs[3]
-        chaos_tab = tabs[4]
-        stats_frame = self.info_tabs.nametowidget(stats_tab)
-        world_frame = self.info_tabs.nametowidget(world_tab)
-        self._render_stats_tab(stats_frame, civs)
-        self._render_world_tab(world_frame)
-        chaos_frame = self.info_tabs.nametowidget(chaos_tab)
-        self._render_chaos_tab(chaos_frame)
+        self._render_stats_tab(self.stats_tab, civs)
+        self._render_world_tab(self.world_tab)
+        self._render_chaos_tab(self.chaos_tab)
 
     def _draw_sparkline(self, canvas: tk.Canvas, civ_id: int, latest_cycle: int) -> None:
         logs = self.sim.db.list_ai_logs("civ", civ_id, limit=60)
