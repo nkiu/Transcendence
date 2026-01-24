@@ -7,9 +7,9 @@ import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from db import Event
-from sim import Simulation
-from ui_tabs import UITabsMixin
+from lib.db import Event
+from lib.sim import Simulation
+from lib.ui_tabs import UITabsMixin
 
 
 class AppUI(UITabsMixin, tk.Frame):

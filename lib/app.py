@@ -1,3 +1,4 @@
+import datetime as dt
 import glob
 import importlib.util
 import os
@@ -5,20 +6,19 @@ import queue
 import re
 import sqlite3
 import threading
-import datetime as dt
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from db import Database
-from llm import LLMClient
-from prompts_design import (
+from lib.db import Database
+from lib.llm import LLMClient
+from lib.sim import Simulation
+from lib.ui import AppUI
+from prompts.prompts_design import (
     DEFAULT_CIV_GEN_PROMPT,
     DEFAULT_CIV_THOUGHT_PROMPT,
     DEFAULT_EVENTS_PROMPT,
     DEFAULT_MASTER_PROMPT,
 )
-from sim import Simulation
-from ui import AppUI
 
 DEFAULT_MASTER_SEED = ""
 DEFAULT_CIV_SEED = ""
@@ -27,9 +27,7 @@ SAVED_PROMPTS_LABEL = "Saved (DB)"
 
 
 def _load_prompt_sets() -> dict:
-    files = sorted(
-        set(glob.glob("prompts_design.py") + glob.glob("prompt_design*.py"))
-    )
+    files = sorted(set(glob.glob(os.path.join("prompts", "*.py"))))
     prompt_sets = {}
 
     def extract_templates(module) -> dict:

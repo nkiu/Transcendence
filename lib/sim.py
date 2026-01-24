@@ -4,21 +4,21 @@ import os
 import random
 from typing import Callable, Dict, List, Optional, Tuple
 
-from db import Database, Planet, StarSystem
-from llm import LLMClient
-from prompts_design import (
-    DEFAULT_CIV_GEN_PROMPT,
-    DEFAULT_CIV_THOUGHT_PROMPT,
-    DEFAULT_EVENTS_PROMPT,
-    DEFAULT_MASTER_PROMPT,
-)
-from rules_engine import (
+from lib.db import Database, Planet, StarSystem
+from lib.llm import LLMClient
+from lib.rules_engine import (
     AppliedEvent,
     CivilizationState,
     CivStats,
     DelayedEffect,
     RulesEngine,
     UniverseState,
+)
+from prompts.prompts_design import (
+    DEFAULT_CIV_GEN_PROMPT,
+    DEFAULT_CIV_THOUGHT_PROMPT,
+    DEFAULT_EVENTS_PROMPT,
+    DEFAULT_MASTER_PROMPT,
 )
 
 
@@ -31,7 +31,8 @@ class Simulation:
         self.prompt_seeds = self._load_prompt_seeds()
         self.prompt_templates = self._load_prompt_templates()
         self.seed = self._init_seed()
-        self.rules_engine = RulesEngine("events_catalog.json", self.seed)
+        catalog_path = os.path.join(os.path.dirname(__file__), "events_catalog.json")
+        self.rules_engine = RulesEngine(catalog_path, self.seed)
         self._ensure_universe()
 
     def run_cycles(self, count: int = 1) -> int:
