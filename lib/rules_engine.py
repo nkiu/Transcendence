@@ -167,10 +167,13 @@ class _PreconditionEvaluator(ast.NodeVisitor):
 
 
 class RulesEngine:
-    def __init__(self, catalog_path: str, rng_seed: int) -> None:
+    def __init__(self, catalog_path: str, rng_seed: int, ruleset=None) -> None:
+        from rulesets.harsh_realism import HarshRealismRuleset
+
         self.catalog_path = catalog_path
         self.rng = random.Random(rng_seed)
         self.events = self._load_catalog(catalog_path)
+        self.ruleset = ruleset or HarshRealismRuleset()
 
     def _load_catalog(self, path: str) -> List[EventDefinition]:
         with open(path, "r", encoding="utf-8") as handle:
@@ -230,34 +233,19 @@ class RulesEngine:
         for civ in civs:
             if not civ.alive:
                 continue
-            stressed = (
-                civ.stats.eco_pressure > 0.55
-                or civ.stats.stability < 0.55
-                or civ.stats.food_security < 0.55
-            )
-            crisis = (
-                civ.stats.eco_pressure > 0.75
-                or civ.stats.stability < 0.35
-                or civ.stats.cohesion < 0.35
-                or civ.stats.food_security < 0.35
-            )
-            if stressed:
-                minor_rolls = self.rng.randint(0, 2)
+            if self.ruleset.is_stressed(civ, universe):
+                minor_rolls = self.ruleset.minor_roll_count(civ, universe, self.rng)
                 civ_events.extend(
                     self._roll_events_for_civ(civ, universe, 1, 2, minor_rolls)
                 )
-            if crisis:
-                major_rolls = self.rng.randint(0, 1)
+            if self.ruleset.is_in_crisis(civ, universe):
+                major_rolls = self.ruleset.major_roll_count(civ, universe, self.rng)
                 civ_events.extend(
                     self._roll_events_for_civ(civ, universe, 3, 5, major_rolls)
                 )
 
-        global_chance = 0.30 if "CosmicInstability" in universe.global_marks else 0.15
-        if self.rng.random() < global_chance:
-            if self.rng.randint(0, 1) == 1:
-                global_events.extend(
-                    self._roll_events_for_global(universe, 1, 5, 1)
-                )
+        if self.ruleset.should_roll_global(universe, self.rng):
+            global_events.extend(self._roll_events_for_global(universe, 1, 5, 1))
 
         for event in civ_events:
             self._apply_event(event, civs, universe)
@@ -269,10 +257,12 @@ class RulesEngine:
         for civ in civs:
             if not civ.alive:
                 continue
-            if self._apply_hard_extinction(civ, universe):
+            if self.ruleset.hard_extinction(civ, universe):
                 continue
-            collapse_event = self._check_collapse(civ, universe)
-            if collapse_event:
+            if self.ruleset.collapse_trigger(civ, universe):
+                collapse_event = self.ruleset.collapse_outcome(
+                    civ, universe, self.rng
+                )
                 civ_events.append(collapse_event)
                 self._apply_event(collapse_event, civs, universe)
 
@@ -341,7 +331,9 @@ class RulesEngine:
         return selected
 
     def _weighted_pick(self, events: List[EventDefinition]) -> EventDefinition:
-        weights = [event.weight_base for event in events]
+        weights = self.ruleset.modify_weights(
+            civ=None, universe=None, eligible_events=events
+        )
         return self.rng.choices(events, weights=weights, k=1)[0]
 
     def _make_applied_event(self, event: EventDefinition, target: str) -> AppliedEvent:
@@ -436,148 +428,6 @@ class RulesEngine:
             applied.append(effect)
         universe.global_pending_effects = remaining
         return applied
-
-    def _check_collapse(
-        self, civ: CivilizationState, universe: UniverseState
-    ) -> Optional[AppliedEvent]:
-        eco_extreme = civ.stats.eco_pressure > 0.95 and civ.stats.stability < 0.10
-        unrest_extreme = civ.stats.cohesion < 0.10 and civ.stats.inequality > 0.90
-        famine_extreme = civ.stats.food_security < 0.10
-
-        civ.consecutive_extreme_eco = (
-            civ.consecutive_extreme_eco + 1 if eco_extreme else 0
-        )
-        civ.consecutive_extreme_unrest = (
-            civ.consecutive_extreme_unrest + 1 if unrest_extreme else 0
-        )
-        civ.consecutive_famine = civ.consecutive_famine + 1 if famine_extreme else 0
-
-        if (
-            civ.consecutive_extreme_eco < 2
-            and civ.consecutive_extreme_unrest < 2
-            and civ.consecutive_famine < 2
-        ):
-            return None
-
-        civ.consecutive_extreme_eco = 0
-        civ.consecutive_extreme_unrest = 0
-        civ.consecutive_famine = 0
-        outcome = self.roll_collapse_table(civ, universe)
-        return outcome
-
-    def _apply_hard_extinction(
-        self, civ: CivilizationState, universe: UniverseState
-    ) -> bool:
-        if civ.stats.stability == 0.0:
-            civ.consecutive_zero_stability += 1
-        else:
-            civ.consecutive_zero_stability = 0
-        if (
-            (civ.stats.cohesion == 0.0 and civ.stats.stability <= 0.05)
-            or (civ.stats.food_security == 0.0 and civ.stats.health <= 0.05)
-            or (civ.stats.health <= 0.05 and civ.stats.food_security <= 0.10)
-            or (civ.stats.cohesion == 0.0 and civ.stats.food_security == 0.0)
-            or (civ.consecutive_zero_stability >= 2)
-        ):
-            civ.alive = False
-            civ.extinct = True
-            civ.extinct_cycle = universe.cycle
-            if "Extinct" not in civ.marks:
-                civ.marks.append("Extinct")
-            return True
-        return False
-
-    def roll_collapse_table(
-        self, civ: CivilizationState, universe: UniverseState
-    ) -> AppliedEvent:
-        roll = self.rng.randint(1, 12)
-        deltas: Dict[str, float] = {}
-        add_marks: List[str] = []
-        remove_marks: List[str] = []
-        delayed: List[DelayedEffect] = []
-        outcome_kind = "shock"
-        if roll in (1, 2, 12):
-            civ.alive = False
-            civ.extinct = True
-            civ.extinct_cycle = universe.cycle
-            add_marks.append("Extinct")
-            outcome_kind = "extinction"
-        elif roll == 3:
-            deltas = {"stability": -0.30, "cohesion": -0.25, "innovation": -0.20}
-            add_marks.append("CollapsedInstitutions")
-            outcome_kind = "collapse"
-        elif roll == 4:
-            deltas = {"health": -0.35, "food_security": -0.30}
-            add_marks.append("MassGraves")
-            delayed.append(
-                DelayedEffect(
-                    cycle_delay=2,
-                    target=civ.id,
-                    deltas={"cohesion": -0.15},
-                    add_marks=[],
-                    remove_marks=[],
-                )
-            )
-            outcome_kind = "collapse"
-        elif roll == 5:
-            deltas = {"cohesion": -0.40}
-            add_marks.append("FragmentedFactions")
-            remove_marks.append("UnifiedFaith")
-            outcome_kind = "fragmentation"
-        elif roll == 6:
-            deltas = {"inequality": 0.20, "stability": -0.20}
-            add_marks.append("WarlordEra")
-            outcome_kind = "fragmentation"
-        elif roll == 7:
-            deltas = {"stability": 0.10, "inequality": 0.25, "innovation": -0.15}
-            add_marks.append("AuthoritarianLock")
-            outcome_kind = "authoritarian_lock"
-        elif roll == 8:
-            deltas = {"cohesion": -0.20, "food_security": 0.05}
-            add_marks.append("Diaspora")
-            delayed.append(
-                DelayedEffect(
-                    cycle_delay=1,
-                    target=civ.id,
-                    deltas={"inequality": 0.10},
-                    add_marks=[],
-                    remove_marks=[],
-                )
-            )
-            outcome_kind = "mass_migration"
-        elif roll == 9:
-            deltas = {"eco_pressure": 0.10, "health": -0.15}
-            add_marks.append("TraumaCycle")
-            delayed.append(
-                DelayedEffect(
-                    cycle_delay=2,
-                    target=civ.id,
-                    deltas={"cohesion": -0.10},
-                    add_marks=[],
-                    remove_marks=[],
-                )
-            )
-            outcome_kind = "shock"
-        elif roll == 10:
-            deltas = {"innovation": -0.25, "stability": -0.10}
-            add_marks.append("LostGeneration")
-            outcome_kind = "shock"
-        elif roll == 11:
-            deltas = {"eco_pressure": 0.10, "food_security": -0.15}
-            add_marks.append("AgriculturalFailure")
-            outcome_kind = "collapse"
-
-        return AppliedEvent(
-            event_id=f"COLLAPSE_TABLE_{roll}",
-            kind=outcome_kind,
-            scope="civ",
-            severity=5,
-            target=civ.id,
-            deltas=deltas,
-            add_marks=add_marks,
-            remove_marks=remove_marks,
-            delayed_effects=delayed,
-        )
 
     def _cooldown_key(self, event_id: str, target: str) -> str:
         return f"{target}:{event_id}"
