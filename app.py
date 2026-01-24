@@ -3,7 +3,9 @@ import importlib.util
 import os
 import queue
 import re
+import sqlite3
 import threading
+import datetime as dt
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -121,6 +123,15 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
         filename = f"{name.strip().replace(' ', '_')}.db"
         selected["path"] = os.path.join("data", filename)
         path_var.set(selected["path"])
+        prompt_set_combo.set(default_prompt_set)
+        prompt_set_label.configure(text=default_prompt_set)
+        _apply_prompt_set(default_prompt_set)
+        db_preview_text.configure(state="normal")
+        db_preview_text.delete("1.0", tk.END)
+        db_preview_text.insert(
+            tk.END, "New game selected. Database preview will appear after save."
+        )
+        db_preview_text.configure(state="disabled")
 
     def pick_load() -> None:
         path = filedialog.askopenfilename(
@@ -132,6 +143,8 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
             selected["path"] = path
             path_var.set(path)
             _load_prompts_from_db(path)
+            _render_db_preview(path)
+            screen_tabs.select(db_tab)
 
     def cancel() -> None:
         selected["path"] = ""
@@ -228,8 +241,10 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
 
     game_tab = tk.Frame(screen_tabs)
     prompt_tab = tk.Frame(screen_tabs)
+    db_tab = tk.Frame(screen_tabs)
     screen_tabs.add(game_tab, text="Game")
     screen_tabs.add(prompt_tab, text="Prompts")
+    screen_tabs.add(db_tab, text="Database")
 
     btns = tk.Frame(game_tab)
     btns.pack(pady=6)
@@ -344,6 +359,102 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
     prompt_set_combo.bind("<<ComboboxSelected>>", on_prompt_set_change)
     prompt_set_label.configure(text=default_prompt_set)
     _apply_prompt_set(default_prompt_set)
+
+    db_header = tk.Label(
+        db_tab,
+        text="Database preview (read-only).",
+        font=("Helvetica", 10),
+    )
+    db_header.pack(anchor="w", padx=6, pady=(6, 2))
+    db_preview_frame = tk.Frame(db_tab)
+    db_preview_frame.pack(fill="both", expand=True, padx=6, pady=6)
+    db_preview_scroll = ttk.Scrollbar(db_preview_frame, orient="vertical")
+    db_preview_text = tk.Text(
+        db_preview_frame, height=10, width=60, yscrollcommand=db_preview_scroll.set
+    )
+    db_preview_scroll.configure(command=db_preview_text.yview)
+    db_preview_text.pack(side="left", fill="both", expand=True)
+    db_preview_scroll.pack(side="right", fill="y")
+    db_preview_text.insert(
+        tk.END, "Load a game to preview the database contents."
+    )
+
+    def _render_db_preview(path: str) -> None:
+        db_preview_text.configure(state="normal")
+        db_preview_text.delete("1.0", tk.END)
+        if not path or not os.path.exists(path):
+            db_preview_text.insert(tk.END, "Database not found.")
+            db_preview_text.configure(state="disabled")
+            return
+        try:
+            stat = os.stat(path)
+            lines = []
+            lines.append(f"Path: {path}")
+            lines.append(f"Size: {stat.st_size} bytes")
+            modified = dt.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+            lines.append(f"Modified: {modified}")
+            lines.append("")
+            with sqlite3.connect(path) as conn:
+                cur = conn.cursor()
+                counts = {}
+                for table in (
+                    "cycles",
+                    "events",
+                    "civilizations",
+                    "systems",
+                    "planets",
+                    "ai_logs",
+                    "world_marks",
+                    "delayed_effects",
+                    "chaos_profiles",
+                ):
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        counts[table] = cur.fetchone()[0]
+                    except sqlite3.Error:
+                        counts[table] = "?"
+                cur.execute("SELECT MAX(id) FROM cycles")
+                latest_cycle = cur.fetchone()[0]
+                lines.append("== COUNTS ==")
+                for key, value in counts.items():
+                    lines.append(f"{key}: {value}")
+                lines.append("")
+                lines.append(f"Latest cycle: {latest_cycle or 0}")
+                cur.execute(
+                    "SELECT id, summary FROM cycles ORDER BY id DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    lines.append(f"Last cycle summary: {row[1] or ''}")
+                lines.append("")
+                cur.execute(
+                    "SELECT name, color, tech_stage, level "
+                    "FROM civilizations ORDER BY id LIMIT 8"
+                )
+                civs = cur.fetchall()
+                lines.append("== CIVILIZATIONS (sample) ==")
+                if civs:
+                    for name, color, tech_stage, level in civs:
+                        lines.append(
+                            f"- {name} [{color}] :: {tech_stage} :: {level}"
+                        )
+                else:
+                    lines.append("(none)")
+                lines.append("")
+                cur.execute(
+                    "SELECT cycle, title FROM events ORDER BY id DESC LIMIT 5"
+                )
+                events = cur.fetchall()
+                lines.append("== RECENT EVENTS ==")
+                if events:
+                    for cycle, title in events:
+                        lines.append(f"[C{cycle}] {title}")
+                else:
+                    lines.append("(none)")
+            db_preview_text.insert(tk.END, "\n".join(lines))
+        except Exception as exc:
+            db_preview_text.insert(tk.END, f"Preview failed: {exc}")
+        db_preview_text.configure(state="disabled")
 
     action_row = tk.Frame(dialog)
     action_row.pack(pady=6)
