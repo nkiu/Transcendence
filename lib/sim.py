@@ -316,6 +316,7 @@ class Simulation:
                 template=self.prompt_templates["civ_thought"],
             )
             if result:
+                self._log_llm_parse_issue("civ", int(civ.id), cycle_id, result.response)
                 logs[civ.id] = result.log
                 self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", result.log)
                 self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", result.god)
@@ -375,6 +376,7 @@ class Simulation:
             template=self.prompt_templates["master"],
         )
         if result:
+            self._log_llm_parse_issue("master", None, cycle_id, result.response)
             self.db.add_ai_log("master", None, cycle_id, "assistant", result.log)
             self.db.add_ai_log("master", None, cycle_id, "god", result.god)
             self.db.add_ai_log("master", None, cycle_id, "prompt", result.prompt)
@@ -987,6 +989,31 @@ class Simulation:
             [applied] if applied.scope == "global" else [],
             [],
         )
+
+    def _log_llm_parse_issue(
+        self,
+        scope: str,
+        civ_id: Optional[int],
+        cycle_id: int,
+        response: Optional[str],
+    ) -> None:
+        if not response:
+            return
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+        try:
+            json.loads(cleaned)
+            return
+        except json.JSONDecodeError:
+            snippet = cleaned.replace("\n", " ")[:400]
+            self.db.add_ai_log(
+                "error",
+                civ_id,
+                cycle_id,
+                "parse",
+                f"{scope} JSON parse failed: {snippet}",
+            )
 
     def _now(self) -> str:
         return dt.datetime.utcnow().isoformat() + "Z"
