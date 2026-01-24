@@ -15,6 +15,7 @@ from lib.rules_engine import (
     RulesEngine,
     UniverseState,
 )
+from rulesets import create_ruleset, list_available_rulesets
 from prompts.prompts_design import (
     DEFAULT_CIV_GEN_PROMPT,
     DEFAULT_CIV_THOUGHT_PROMPT,
@@ -32,8 +33,16 @@ class Simulation:
         self.prompt_seeds = self._load_prompt_seeds()
         self.prompt_templates = self._load_prompt_templates()
         self.seed = self._init_seed()
+        available_rulesets = {name for name, _ in list_available_rulesets()}
+        stored_ruleset = self.db.get_setting("ruleset_name") or "harsh_realism"
+        if stored_ruleset not in available_rulesets:
+            stored_ruleset = "harsh_realism"
+            self.db.set_setting("ruleset_name", stored_ruleset)
+        self.ruleset_name = stored_ruleset
         catalog_path = os.path.join(os.path.dirname(__file__), "events_catalog.json")
-        self.rules_engine = RulesEngine(catalog_path, self.seed)
+        self.rules_engine = RulesEngine(
+            catalog_path, self.seed, create_ruleset(self.ruleset_name)
+        )
         self._ensure_universe()
         self.LEGACY_JSON_MODE = False
 
@@ -98,6 +107,7 @@ class Simulation:
             global_events,
             civ_reports,
             master_report,
+            delayed_applied,
         )
         self.db.set_setting("last_cycle", str(cycle_id))
         return cycle_id
@@ -1102,6 +1112,15 @@ class Simulation:
             "remove_marks": event.remove_marks,
         }
 
+    def _delayed_to_dict(self, effect: DelayedEffect) -> Dict[str, object]:
+        return {
+            "cycle_delay": effect.cycle_delay,
+            "target": effect.target,
+            "deltas": effect.deltas,
+            "add_marks": effect.add_marks,
+            "remove_marks": effect.remove_marks,
+        }
+
     def _store_cycle_record(
         self,
         cycle_id: int,
@@ -1111,6 +1130,7 @@ class Simulation:
         global_events: List[AppliedEvent],
         civ_reports: Dict[str, Dict[str, str]],
         master_report: Dict[str, str],
+        delayed_applied: List[DelayedEffect],
     ) -> None:
         record = {
             "cycle": cycle_id,
@@ -1118,6 +1138,13 @@ class Simulation:
             "global": {
                 "global_marks": list(universe_state.global_marks),
                 "global_events_applied": [self._event_to_dict(e) for e in global_events],
+            },
+            "delayed_effects": {
+                "queued": [
+                    self._delayed_to_dict(effect)
+                    for effect in universe_state.global_pending_effects
+                ],
+                "applied": [self._delayed_to_dict(effect) for effect in delayed_applied],
             },
             "civilizations": [],
             "master": {
@@ -1140,6 +1167,7 @@ class Simulation:
                     "name": civ.name,
                     "color": civ.color,
                     "alive": civ.alive and not civ.extinct,
+                    "extinct": civ.extinct,
                     "extinct_cycle": civ.extinct_cycle,
                     "stats": civ.stats.as_dict(),
                     "world_marks": list(civ.marks),
