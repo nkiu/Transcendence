@@ -219,11 +219,6 @@ class AppUI(tk.Frame):
         self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.chaos_tab, text="Chaos")
 
-        self.live_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(self.live_tab, text="Master Live")
-        self.master_live_text = tk.Text(self.live_tab, wrap="word")
-        self._setup_text_widget(self.master_live_text)
-        self.master_live_text.pack(fill="both", expand=True)
 
         player_frame = tk.Frame(right, bg=self.theme["panel_alt"])
         player_frame.pack(fill="x", pady=(0, 6))
@@ -538,26 +533,16 @@ class AppUI(tk.Frame):
             text.insert(tk.END, f"[C{cycle}] {role}:\n", "header")
             text.see(tk.END)
             self._focus_llm_tab(scope, civ_id)
-            if scope == "master" and hasattr(self, "master_live_text"):
-                self.master_live_text.delete("1.0", tk.END)
-                self.master_live_text.insert(
-                    tk.END, f"[C{cycle}] Master AI streaming...\n", "header"
-                )
         elif event_type == "log_chunk":
             tag = role if role in ("prompt", "god", "analysis") else "assistant"
             text.insert(tk.END, payload.get("chunk", ""), tag)
             text.see(tk.END)
             self._focus_llm_tab(scope, civ_id)
-            if scope == "master" and hasattr(self, "master_live_text"):
-                self.master_live_text.insert(tk.END, payload.get("chunk", ""), tag)
-                self.master_live_text.see(tk.END)
         elif event_type == "log_end":
             text.insert(tk.END, "\n\n", "assistant")
             text.see(tk.END)
             if scope == "civ" and civ_id:
                 self._pulse_civ(int(civ_id))
-            if scope == "master" and hasattr(self, "master_live_text"):
-                self.master_live_text.insert(tk.END, "\n\n", "assistant")
 
     def _on_canvas_resize(self, _event: tk.Event) -> None:
         self._seed_starfield()
