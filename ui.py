@@ -213,6 +213,12 @@ class AppUI(tk.Frame):
         world_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(world_tab, text="World")
 
+        chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(chaos_tab, text="Chaos")
+        self.chaos_text = tk.Text(chaos_tab, wrap="word")
+        self._setup_text_widget(self.chaos_text)
+        self.chaos_text.pack(fill="both", expand=True)
+
         self.civ_tabs = ttk.Notebook(right)
         self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
 
@@ -451,6 +457,12 @@ class AppUI(tk.Frame):
         civ_id = payload.get("civ_id")
         if scope == "master":
             key = "master"
+        elif scope == "chaos":
+            text = getattr(self, "chaos_text", None)
+            if not text:
+                return
+            self._handle_log_stream_to_widget(text, payload, scope, civ_id)
+            return
         else:
             if not civ_id:
                 return
@@ -461,6 +473,11 @@ class AppUI(tk.Frame):
             text = self.log_texts.get(key)
         if not text:
             return
+        self._handle_log_stream_to_widget(text, payload, scope, civ_id)
+
+    def _handle_log_stream_to_widget(
+        self, text: tk.Text, payload, scope: str, civ_id: str
+    ) -> None:
         event_type = payload.get("type")
         cycle = payload.get("cycle", "?")
         role = payload.get("role", "assistant")
@@ -870,6 +887,8 @@ class AppUI(tk.Frame):
     def _focus_llm_tab(self, scope: str, civ_id: str) -> None:
         if scope == "master":
             tab = self._civ_tab_ids.get("master")
+        elif scope == "chaos":
+            return
         else:
             if not civ_id:
                 return
@@ -883,6 +902,8 @@ class AppUI(tk.Frame):
         return
 
     def _render_stats_tab(self, parent: tk.Frame, civs) -> None:
+        for child in parent.winfo_children():
+            child.destroy()
         parent.configure(bg=self.theme["panel"])
         canvas = tk.Canvas(parent, bg=self.theme["panel"], highlightthickness=0)
         scroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -983,16 +1004,30 @@ class AppUI(tk.Frame):
 
         text.insert(tk.END, "\n".join(lines))
 
+    def _render_chaos_tab(self, parent: tk.Frame) -> None:
+        for child in parent.winfo_children():
+            child.destroy()
+        parent.configure(bg=self.theme["panel"])
+        text = tk.Text(parent, wrap="word")
+        self._setup_text_widget(text)
+        text.pack(fill="both", expand=True)
+        logs = self.sim.db.list_ai_logs("chaos", None, limit=120)
+        self._insert_logs(text, list(reversed(logs)))
+        self.chaos_text = text
+
     def _refresh_info_tabs(self, civs) -> None:
         tabs = self.info_tabs.tabs()
-        if len(tabs) < 4:
+        if len(tabs) < 5:
             return
         stats_tab = tabs[2]
         world_tab = tabs[3]
+        chaos_tab = tabs[4]
         stats_frame = self.info_tabs.nametowidget(stats_tab)
         world_frame = self.info_tabs.nametowidget(world_tab)
         self._render_stats_tab(stats_frame, civs)
         self._render_world_tab(world_frame)
+        chaos_frame = self.info_tabs.nametowidget(chaos_tab)
+        self._render_chaos_tab(chaos_frame)
 
     def _draw_sparkline(self, canvas: tk.Canvas, civ_id: int, latest_cycle: int) -> None:
         logs = self.sim.db.list_ai_logs("civ", civ_id, limit=60)
