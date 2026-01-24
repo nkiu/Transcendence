@@ -585,10 +585,10 @@ class AppUI(UITabsMixin, tk.Frame):
                 "The universe cooled.\n\n"
                 "No signals remain.\n\n"
                 "Once, there were civilizations here.\n"
-                "They did not know each other.\n"
-                "They did not reach the stars.\n"
+                "They may have met each other.\n"
+                "They may have reached the stars.\n"
                 "They endured, briefly.\n\n"
-                "Please wait, history being extracted from the ashes of the civilization..."
+                "Please wait, history being extracted from the ashes of the civilizations..."
             ]
         )
         threading.Thread(target=self._generate_obituaries, daemon=True).start()
