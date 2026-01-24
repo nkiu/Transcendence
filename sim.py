@@ -528,6 +528,8 @@ class Simulation:
         if not isinstance(metadata, dict):
             return
         delayed = metadata.get("delayed_effects", [])
+        if not isinstance(delayed, list):
+            delayed = []
         for item in delayed:
             if not isinstance(item, dict):
                 continue
@@ -540,6 +542,8 @@ class Simulation:
                 payload = {}
             self.db.add_delayed_effect(due, civ_id, kind, payload)
         marks = metadata.get("world_marks", [])
+        if not isinstance(marks, list):
+            marks = []
         for item in marks:
             if not isinstance(item, dict):
                 continue
