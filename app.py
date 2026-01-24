@@ -4,16 +4,39 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from db import Database
 from llm import LLMClient
+from prompts_design import (
+    DEFAULT_CIV_GEN_PROMPT,
+    DEFAULT_CIV_THOUGHT_PROMPT,
+    DEFAULT_EVENTS_PROMPT,
+    DEFAULT_MASTER_PROMPT,
+)
 from sim import Simulation
 from ui import AppUI
 
+DEFAULT_MASTER_SEED = ""
+DEFAULT_CIV_SEED = ""
+DEFAULT_CHAOS_SEED = ""
 
-def select_db_path() -> tuple[str, bool, str]:
+
+def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
     os.makedirs("data", exist_ok=True)
     chooser = tk.Tk()
     chooser.withdraw()
 
-    selected = {"path": "", "ollama_on": True, "model": ""}
+    selected = {
+        "path": "",
+        "ollama_on": True,
+        "model": "",
+        "prompt_master": DEFAULT_MASTER_SEED,
+        "prompt_civ": DEFAULT_CIV_SEED,
+        "prompt_chaos": DEFAULT_CHAOS_SEED,
+        "templates": {
+            "events": DEFAULT_EVENTS_PROMPT,
+            "civ_gen": DEFAULT_CIV_GEN_PROMPT,
+            "civ_thought": DEFAULT_CIV_THOUGHT_PROMPT,
+            "master": DEFAULT_MASTER_PROMPT,
+        },
+    }
     llm = LLMClient(mode="ollama")
 
     def pick_new() -> None:
@@ -24,7 +47,7 @@ def select_db_path() -> tuple[str, bool, str]:
             return
         filename = f"{name.strip().replace(' ', '_')}.db"
         selected["path"] = os.path.join("data", filename)
-        dialog.destroy()
+        path_var.set(selected["path"])
 
     def pick_load() -> None:
         path = filedialog.askopenfilename(
@@ -34,9 +57,11 @@ def select_db_path() -> tuple[str, bool, str]:
         )
         if path:
             selected["path"] = path
-            dialog.destroy()
+            path_var.set(path)
+            _load_prompts_from_db(path)
 
     def cancel() -> None:
+        selected["path"] = ""
         dialog.destroy()
 
     def refresh_models() -> None:
@@ -66,20 +91,74 @@ def select_db_path() -> tuple[str, bool, str]:
     def toggle_ollama() -> None:
         selected["ollama_on"] = bool(ollama_var.get())
 
+    def _load_prompts_from_db(path: str) -> None:
+        try:
+            db = Database(path)
+            events_prompt.delete("1.0", tk.END)
+            civ_gen_prompt.delete("1.0", tk.END)
+            civ_thought_prompt.delete("1.0", tk.END)
+            master_prompt.delete("1.0", tk.END)
+            events_prompt.insert(
+                tk.END,
+                db.get_setting("prompt_events") or DEFAULT_EVENTS_PROMPT,
+            )
+            civ_gen_prompt.insert(
+                tk.END,
+                db.get_setting("prompt_civ_gen") or DEFAULT_CIV_GEN_PROMPT,
+            )
+            civ_thought_prompt.insert(
+                tk.END,
+                db.get_setting("prompt_civ_thought") or DEFAULT_CIV_THOUGHT_PROMPT,
+            )
+            master_prompt.insert(
+                tk.END,
+                db.get_setting("prompt_master_template") or DEFAULT_MASTER_PROMPT,
+            )
+            db.close()
+        except Exception:
+            pass
+
+    def start_game() -> None:
+        if not selected["path"]:
+            messagebox.showinfo("Select game", "Pick or create a game first.")
+            return
+        selected["prompt_master"] = DEFAULT_MASTER_SEED
+        selected["prompt_civ"] = DEFAULT_CIV_SEED
+        selected["prompt_chaos"] = DEFAULT_CHAOS_SEED
+        selected["templates"] = {
+            "events": events_prompt.get("1.0", tk.END).strip()
+            or DEFAULT_EVENTS_PROMPT,
+            "civ_gen": civ_gen_prompt.get("1.0", tk.END).strip()
+            or DEFAULT_CIV_GEN_PROMPT,
+            "civ_thought": civ_thought_prompt.get("1.0", tk.END).strip()
+            or DEFAULT_CIV_THOUGHT_PROMPT,
+            "master": master_prompt.get("1.0", tk.END).strip()
+            or DEFAULT_MASTER_PROMPT,
+        }
+        dialog.destroy()
+
     dialog = tk.Toplevel(chooser)
     dialog.title("Select Game")
-    dialog.geometry("420x320")
+    dialog.geometry("640x620")
     dialog.resizable(False, False)
 
-    label = tk.Label(
+    header = tk.Label(
         dialog,
-        text="Create a new game or load an existing one.",
+        text="Create or load a game, then review prompts.",
         font=("Helvetica", 11),
     )
-    label.pack(pady=14)
+    header.pack(pady=10)
 
-    btns = tk.Frame(dialog)
-    btns.pack(pady=8)
+    screen_tabs = ttk.Notebook(dialog)
+    screen_tabs.pack(fill="both", expand=True, padx=12, pady=6)
+
+    game_tab = tk.Frame(screen_tabs)
+    prompt_tab = tk.Frame(screen_tabs)
+    screen_tabs.add(game_tab, text="Game")
+    screen_tabs.add(prompt_tab, text="Prompts")
+
+    btns = tk.Frame(game_tab)
+    btns.pack(pady=6)
 
     tk.Button(btns, text="New Game", width=12, command=pick_new).pack(
         side="left", padx=6
@@ -88,7 +167,11 @@ def select_db_path() -> tuple[str, bool, str]:
         side="left", padx=6
     )
 
-    llm_frame = tk.Frame(dialog)
+    path_var = tk.StringVar(value="")
+    path_label = tk.Label(game_tab, textvariable=path_var, font=("Helvetica", 9))
+    path_label.pack(pady=(4, 0))
+
+    llm_frame = tk.Frame(game_tab)
     llm_frame.pack(fill="x", padx=12, pady=(12, 0))
 
     status_var = tk.StringVar(value="OLLAMA: checking...")
@@ -112,7 +195,34 @@ def select_db_path() -> tuple[str, bool, str]:
         anchor="w", pady=(4, 6)
     )
 
-    tk.Button(dialog, text="Cancel", width=12, command=cancel).pack(pady=8)
+    template_tabs = ttk.Notebook(prompt_tab)
+    template_tabs.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _make_template_tab(title: str) -> tk.Text:
+        frame = tk.Frame(template_tabs)
+        text = tk.Text(frame, height=8, width=60)
+        text.pack(fill="both", expand=True)
+        template_tabs.add(frame, text=title)
+        return text
+
+    events_prompt = _make_template_tab("Events")
+    civ_gen_prompt = _make_template_tab("Civ Gen")
+    civ_thought_prompt = _make_template_tab("Civ Thought")
+    master_prompt = _make_template_tab("Master")
+
+    events_prompt.insert(tk.END, DEFAULT_EVENTS_PROMPT)
+    civ_gen_prompt.insert(tk.END, DEFAULT_CIV_GEN_PROMPT)
+    civ_thought_prompt.insert(tk.END, DEFAULT_CIV_THOUGHT_PROMPT)
+    master_prompt.insert(tk.END, DEFAULT_MASTER_PROMPT)
+
+    action_row = tk.Frame(dialog)
+    action_row.pack(pady=6)
+    tk.Button(action_row, text="Start", width=12, command=start_game).pack(
+        side="left", padx=6
+    )
+    tk.Button(action_row, text="Cancel", width=12, command=cancel).pack(
+        side="left", padx=6
+    )
 
     refresh_models()
 
@@ -121,17 +231,40 @@ def select_db_path() -> tuple[str, bool, str]:
 
     if not selected["path"]:
         messagebox.showinfo("No game selected", "Exiting application.")
-    return selected["path"], selected["ollama_on"], selected["model"]
+    return (
+        selected["path"],
+        selected["ollama_on"],
+        selected["model"],
+        selected["prompt_master"],
+        selected["prompt_civ"],
+        selected["prompt_chaos"],
+        selected["templates"],
+    )
 
 
 def main() -> None:
-    db_path, ollama_on, model = select_db_path()
+    (
+        db_path,
+        ollama_on,
+        model,
+        prompt_master,
+        prompt_civ,
+        prompt_chaos,
+        templates,
+    ) = select_db_path()
     if not db_path:
         return
     os.environ["OLLAMA_ON"] = "1" if ollama_on else "0"
     if model:
         os.environ["OLLAMA_MODEL"] = model
     db = Database(db_path)
+    db.set_setting("prompt_master", prompt_master)
+    db.set_setting("prompt_civ", prompt_civ)
+    db.set_setting("prompt_chaos", prompt_chaos)
+    db.set_setting("prompt_events", templates["events"])
+    db.set_setting("prompt_civ_gen", templates["civ_gen"])
+    db.set_setting("prompt_civ_thought", templates["civ_thought"])
+    db.set_setting("prompt_master_template", templates["master"])
     sim = Simulation(db)
 
     root = tk.Tk()
