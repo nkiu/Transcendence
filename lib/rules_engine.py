@@ -52,6 +52,7 @@ class CivilizationState:
     consecutive_extreme_unrest: int = 0
     consecutive_famine: int = 0
     consecutive_zero_stability: int = 0
+    consecutive_good_cycles: int = 0
 
 
 @dataclass
