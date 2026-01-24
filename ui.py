@@ -220,11 +220,16 @@ class AppUI(UITabsMixin, tk.Frame):
         self.info_tabs.add(self.world_tab, text="World")
 
         self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(self.chaos_tab, text="Chaos")
+        self.info_tabs.add(self.chaos_tab, text="Rules")
 
 
-        player_frame = tk.Frame(right, bg=self.theme["panel_alt"])
-        player_frame.pack(fill="x", pady=(0, 6))
+        player_row = tk.Frame(right, bg=self.theme["panel_alt"])
+        player_row.pack(fill="x", pady=(0, 6))
+        player_row.columnconfigure(0, weight=1)
+        player_row.columnconfigure(1, weight=1)
+
+        player_frame = tk.Frame(player_row, bg=self.theme["panel_alt"])
+        player_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         tk.Label(
             player_frame,
             text="PLAYER DIRECTIVE (next cycle)",
@@ -255,6 +260,46 @@ class AppUI(UITabsMixin, tk.Frame):
             activeforeground=self.theme["bg"],
             highlightbackground=self.theme["panel"],
         ).pack(side="left", padx=6)
+
+        command_frame = tk.Frame(player_row, bg=self.theme["panel_alt"])
+        command_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        tk.Label(
+            command_frame,
+            text="PLAYER COMMAND",
+            font=("Consolas", 9, "bold"),
+            bg=self.theme["panel_alt"],
+            fg=self.theme["accent_alt"],
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+        cmd_row = tk.Frame(command_frame, bg=self.theme["panel_alt"])
+        cmd_row.pack(fill="x", padx=8, pady=(0, 6))
+        self.command_type = ttk.Combobox(
+            cmd_row,
+            values=["END_UNIVERSE", "KILL_CIV", "FORCE_EVENT", "SET_GLOBAL_MARK"],
+            state="readonly",
+            width=18,
+        )
+        self.command_type.pack(side="left")
+        self.command_type.set("END_UNIVERSE")
+        self.command_target = ttk.Combobox(cmd_row, values=[], state="readonly", width=18)
+        self.command_target.pack(side="left", padx=6)
+        self.command_arg = tk.Entry(
+            cmd_row,
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+            insertbackground=self.theme["accent"],
+            width=24,
+        )
+        self.command_arg.pack(side="left", padx=6)
+        tk.Button(
+            cmd_row,
+            text="Queue",
+            command=self._queue_player_command,
+            bg=self.theme["panel"],
+            fg=self.theme["accent"],
+            activebackground=self.theme["accent"],
+            activeforeground=self.theme["bg"],
+            highlightbackground=self.theme["panel"],
+        ).pack(side="left")
 
         self.civ_tabs = ttk.Notebook(right)
         self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
@@ -371,6 +416,11 @@ class AppUI(UITabsMixin, tk.Frame):
     def _run_loop(self) -> None:
         while not self._stop:
             if self.is_running:
+                if self.sim.is_ended():
+                    self.is_running = False
+                    self.status_var.set("Universe ended: No signals detected.")
+                    time.sleep(0.2)
+                    continue
                 self.sim.run_cycle_stream(self._enqueue_stream)
                 self.queue.put({"type": "cycle_complete"})
                 time.sleep(self.cycle_interval_ms / 1000.0)
@@ -411,7 +461,7 @@ class AppUI(UITabsMixin, tk.Frame):
             for planet in planets:
                 civ = civ_planets.get(planet.id)
                 if civ:
-                    color = civ.color
+                    color = "#444444" if getattr(civ, "extinct", 0) else civ.color
                     self._civ_systems[civ.id] = system.id
                     break
             system_colors[system.id] = color

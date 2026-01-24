@@ -1,3 +1,4 @@
+import json
 import tkinter as tk
 from tkinter import ttk
 
@@ -79,7 +80,7 @@ class UITabsMixin:
             bg=self.theme["panel"],
             fg=self.theme["accent_alt"],
         )
-        header.grid(row=0, column=0, columnspan=6, sticky="w", padx=10, pady=(8, 6))
+        header.grid(row=0, column=0, columnspan=7, sticky="w", padx=10, pady=(8, 6))
 
         def bar(parent_widget, value: float) -> ttk.Progressbar:
             p = ttk.Progressbar(parent_widget, length=120, maximum=100)
@@ -104,6 +105,8 @@ class UITabsMixin:
                 ("Eco", civ.eco_pressure),
                 ("Innovation", civ.innovation),
                 ("Stability", civ.stability),
+                ("Food", getattr(civ, "food_security", 0.0)),
+                ("Health", getattr(civ, "health", 0.0)),
             ]
             for idx, (name, value) in enumerate(labels):
                 lbl = tk.Label(
@@ -170,8 +173,55 @@ class UITabsMixin:
         text = tk.Text(parent, wrap="word")
         self._setup_text_widget(text)
         text.pack(fill="both", expand=True)
-        logs = self.sim.db.list_ai_logs("chaos", None, limit=120)
-        self._insert_logs(text, list(reversed(logs)))
+
+        seed = self.sim.db.get_setting("seed") or "unknown"
+        ended = self.sim.db.get_setting("universe_ended") == "1"
+        reason = self.sim.db.get_setting("universe_end_reason") or ""
+        cooldowns = self.sim.db.get_setting("event_cooldowns") or "{}"
+        try:
+            cooldowns_data = json.loads(cooldowns)
+            cooldown_count = len(cooldowns_data) if isinstance(cooldowns_data, dict) else 0
+        except json.JSONDecodeError:
+            cooldown_count = 0
+
+        lines = []
+        lines.append("== RULES ENGINE ==")
+        lines.append(f"seed = {seed}")
+        lines.append(f"universe_ended = {ended}")
+        if reason:
+            lines.append(f"end_reason = {reason}")
+        lines.append(f"cooldowns_tracked = {cooldown_count}")
+        lines.append("")
+
+        lines.append("== GLOBAL MARKS ==")
+        marks = self.sim.db.list_marks(None)
+        lines.extend(marks or ["(none)"])
+        lines.append("")
+
+        lines.append("== PENDING EFFECTS ==")
+        pending = self.sim.db.list_all_delayed_effects()
+        if pending:
+            for effect in pending[:20]:
+                target = f"CIV{effect.civ_id}" if effect.civ_id else "global"
+                lines.append(f"[due C{effect.cycle_due}] {target} :: {effect.kind}")
+                lines.append(f"  payload: {effect.payload}")
+        else:
+            lines.append("(none)")
+        lines.append("")
+
+        lines.append("== RECENT RULES EVENTS ==")
+        events = self.sim.db.list_events(limit=20)
+        if events:
+            for event in reversed(events):
+                meta = event.metadata if isinstance(event.metadata, dict) else {}
+                event_id = meta.get("event_id", event.kind)
+                severity = meta.get("severity", "?")
+                target = meta.get("target", "-")
+                lines.append(f"[C{event.cycle}] {event_id} :: sev={severity} :: {target}")
+        else:
+            lines.append("(none)")
+
+        text.insert(tk.END, "\n".join(lines))
         self.chaos_text = text
 
     def _refresh_info_tabs(self, civs) -> None:
@@ -217,7 +267,8 @@ class UITabsMixin:
                 highlightthickness=0,
             )
             dot.pack(side="left")
-            dot.create_oval(2, 2, 10, 10, fill=civ.color, outline="")
+            fill = "#444444" if getattr(civ, "extinct", 0) else civ.color
+            dot.create_oval(2, 2, 10, 10, fill=fill, outline="")
             spark = tk.Canvas(
                 row,
                 width=80,
@@ -226,9 +277,10 @@ class UITabsMixin:
                 highlightthickness=0,
             )
             spark.pack(side="right", padx=6)
+            status = "EXTINCT" if getattr(civ, "extinct", 0) else civ.status
             label = tk.Label(
                 row,
-                text=f"{civ.name} :: {civ.level} :: {civ.status}",
+                text=f"{civ.name} :: {civ.level} :: {status}",
                 bg=self.theme["panel_alt"],
                 fg=self.theme["text"],
                 font=("Consolas", 9),
@@ -242,6 +294,11 @@ class UITabsMixin:
             self.player_combo.configure(values=options)
             if not self.player_combo.get():
                 self.player_combo.set(options[0])
+        if hasattr(self, "command_target"):
+            command_options = ["global"] + [civ.name for civ in civs]
+            self.command_target.configure(values=command_options)
+            if not self.command_target.get():
+                self.command_target.set(command_options[0])
 
     def _queue_player_directive(self) -> None:
         if not hasattr(self, "player_text"):
@@ -257,3 +314,40 @@ class UITabsMixin:
         self.sim.db.set_setting("player_directive_text", text)
         self.sim.db.set_setting("player_directive_target", target_key)
         self.player_text.delete("1.0", tk.END)
+
+    def _queue_player_command(self) -> None:
+        if not hasattr(self, "command_type"):
+            return
+        command_type = self.command_type.get().strip()
+        arg = self.command_arg.get().strip() if hasattr(self, "command_arg") else ""
+        target = self.command_target.get().strip() if hasattr(self, "command_target") else ""
+        if not command_type:
+            return
+        payload = {"type": command_type}
+        if command_type == "END_UNIVERSE":
+            payload["reason"] = arg or "Player command"
+        elif command_type == "KILL_CIV":
+            if not target or target == "global":
+                return
+            payload["civ_id"] = self._civ_id_for_name(target)
+        elif command_type == "FORCE_EVENT":
+            payload["event_id"] = arg
+            if target and target != "global":
+                payload["target"] = self._civ_id_for_name(target)
+            else:
+                payload["target"] = "global"
+        elif command_type == "SET_GLOBAL_MARK":
+            payload["mark"] = arg
+        if "civ_id" in payload and payload["civ_id"] is None:
+            return
+        if payload.get("target") is None:
+            return
+        self.sim.db.set_setting("player_command_json", json.dumps(payload))
+        if hasattr(self, "command_arg"):
+            self.command_arg.delete(0, tk.END)
+
+    def _civ_id_for_name(self, name: str):
+        for civ in self.sim.db.list_civilizations():
+            if civ.name == name:
+                return civ.id
+        return None

@@ -46,13 +46,20 @@ class Civilization:
     level: str
     status: str
     extinct: int
+    extinct_cycle: Optional[int]
     cohesion: float
     inequality: float
     eco_pressure: float
     innovation: float
     stability: float
+    food_security: float
+    health: float
     tech_stage: str
     memory_long: str
+    consecutive_extreme_eco: int
+    consecutive_extreme_unrest: int
+    consecutive_famine: int
+    consecutive_zero_stability: int
 
 
 @dataclass
@@ -180,13 +187,20 @@ class Database:
                     level TEXT NOT NULL,
                     status TEXT NOT NULL,
                     extinct INTEGER NOT NULL DEFAULT 0,
+                    extinct_cycle INTEGER,
                     cohesion REAL NOT NULL DEFAULT 0.5,
                     inequality REAL NOT NULL DEFAULT 0.5,
                     eco_pressure REAL NOT NULL DEFAULT 0.5,
                     innovation REAL NOT NULL DEFAULT 0.5,
                     stability REAL NOT NULL DEFAULT 0.5,
+                    food_security REAL NOT NULL DEFAULT 0.5,
+                    health REAL NOT NULL DEFAULT 0.5,
                     tech_stage TEXT NOT NULL DEFAULT 'stone',
                     memory_long TEXT NOT NULL DEFAULT '',
+                    consecutive_extreme_eco INTEGER NOT NULL DEFAULT 0,
+                    consecutive_extreme_unrest INTEGER NOT NULL DEFAULT 0,
+                    consecutive_famine INTEGER NOT NULL DEFAULT 0,
+                    consecutive_zero_stability INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(home_planet_id) REFERENCES planets(id)
                 )
                 """
@@ -247,6 +261,19 @@ class Database:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS marks (
+                    id INTEGER PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    civ_id INTEGER,
+                    label TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(scope, civ_id, label),
+                    FOREIGN KEY(civ_id) REFERENCES civilizations(id)
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS run_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -278,9 +305,16 @@ class Database:
             self._ensure_column("civilizations", "eco_pressure", "REAL", "0.5")
             self._ensure_column("civilizations", "innovation", "REAL", "0.5")
             self._ensure_column("civilizations", "stability", "REAL", "0.5")
+            self._ensure_column("civilizations", "food_security", "REAL", "0.5")
+            self._ensure_column("civilizations", "health", "REAL", "0.5")
             self._ensure_column("civilizations", "tech_stage", "TEXT", "'stone'")
             self._ensure_column("civilizations", "memory_long", "TEXT", "''")
             self._ensure_column("civilizations", "extinct", "INTEGER", "0")
+            self._ensure_column("civilizations", "extinct_cycle", "INTEGER", "NULL")
+            self._ensure_column("civilizations", "consecutive_extreme_eco", "INTEGER", "0")
+            self._ensure_column("civilizations", "consecutive_extreme_unrest", "INTEGER", "0")
+            self._ensure_column("civilizations", "consecutive_famine", "INTEGER", "0")
+            self._ensure_column("civilizations", "consecutive_zero_stability", "INTEGER", "0")
 
     def _ensure_column(
         self, table: str, column: str, col_type: str, default: str
@@ -400,13 +434,20 @@ class Database:
         level: str,
         status: str,
         extinct: int,
+        extinct_cycle: Optional[int],
         cohesion: float,
         inequality: float,
         eco_pressure: float,
         innovation: float,
         stability: float,
+        food_security: float,
+        health: float,
         tech_stage: str,
         memory_long: str,
+        consecutive_extreme_eco: int,
+        consecutive_extreme_unrest: int,
+        consecutive_famine: int,
+        consecutive_zero_stability: int,
     ) -> int:
         with self._lock:
             cur = self._conn.cursor()
@@ -419,15 +460,22 @@ class Database:
                     level,
                     status,
                     extinct,
+                    extinct_cycle,
                     cohesion,
                     inequality,
                     eco_pressure,
                     innovation,
                     stability,
+                    food_security,
+                    health,
                     tech_stage,
-                    memory_long
+                    memory_long,
+                    consecutive_extreme_eco,
+                    consecutive_extreme_unrest,
+                    consecutive_famine,
+                    consecutive_zero_stability
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -436,13 +484,20 @@ class Database:
                     level,
                     status,
                     extinct,
+                    extinct_cycle,
                     cohesion,
                     inequality,
                     eco_pressure,
                     innovation,
                     stability,
+                    food_security,
+                    health,
                     tech_stage,
                     memory_long,
+                    consecutive_extreme_eco,
+                    consecutive_extreme_unrest,
+                    consecutive_famine,
+                    consecutive_zero_stability,
                 ),
             )
             self._conn.commit()
@@ -456,13 +511,20 @@ class Database:
         level: Optional[str] = None,
         status: Optional[str] = None,
         extinct: Optional[int] = None,
+        extinct_cycle: Optional[int] = None,
         cohesion: Optional[float] = None,
         inequality: Optional[float] = None,
         eco_pressure: Optional[float] = None,
         innovation: Optional[float] = None,
         stability: Optional[float] = None,
+        food_security: Optional[float] = None,
+        health: Optional[float] = None,
         tech_stage: Optional[str] = None,
         memory_long: Optional[str] = None,
+        consecutive_extreme_eco: Optional[int] = None,
+        consecutive_extreme_unrest: Optional[int] = None,
+        consecutive_famine: Optional[int] = None,
+        consecutive_zero_stability: Optional[int] = None,
     ) -> None:
         fields = []
         values = []
@@ -481,6 +543,9 @@ class Database:
         if extinct is not None:
             fields.append("extinct = ?")
             values.append(extinct)
+        if extinct_cycle is not None:
+            fields.append("extinct_cycle = ?")
+            values.append(extinct_cycle)
         if cohesion is not None:
             fields.append("cohesion = ?")
             values.append(cohesion)
@@ -496,12 +561,30 @@ class Database:
         if stability is not None:
             fields.append("stability = ?")
             values.append(stability)
+        if food_security is not None:
+            fields.append("food_security = ?")
+            values.append(food_security)
+        if health is not None:
+            fields.append("health = ?")
+            values.append(health)
         if tech_stage:
             fields.append("tech_stage = ?")
             values.append(tech_stage)
         if memory_long is not None:
             fields.append("memory_long = ?")
             values.append(memory_long)
+        if consecutive_extreme_eco is not None:
+            fields.append("consecutive_extreme_eco = ?")
+            values.append(consecutive_extreme_eco)
+        if consecutive_extreme_unrest is not None:
+            fields.append("consecutive_extreme_unrest = ?")
+            values.append(consecutive_extreme_unrest)
+        if consecutive_famine is not None:
+            fields.append("consecutive_famine = ?")
+            values.append(consecutive_famine)
+        if consecutive_zero_stability is not None:
+            fields.append("consecutive_zero_stability = ?")
+            values.append(consecutive_zero_stability)
         if not fields:
             return
         values.append(civ_id)
@@ -585,8 +668,10 @@ class Database:
             cur.execute(
                 """
                 SELECT id, name, color, home_planet_id, level, status,
-                       extinct, cohesion, inequality, eco_pressure, innovation, stability,
-                       tech_stage, memory_long
+                       extinct, extinct_cycle, cohesion, inequality, eco_pressure, innovation, stability,
+                       food_security, health, tech_stage, memory_long,
+                       consecutive_extreme_eco, consecutive_extreme_unrest, consecutive_famine,
+                       consecutive_zero_stability
                 FROM civilizations
                 ORDER BY id
                 """
@@ -601,13 +686,20 @@ class Database:
                     r["level"],
                     r["status"],
                     int(r["extinct"]),
+                    int(r["extinct_cycle"]) if r["extinct_cycle"] is not None else None,
                     float(r["cohesion"]),
                     float(r["inequality"]),
                     float(r["eco_pressure"]),
                     float(r["innovation"]),
                     float(r["stability"]),
+                    float(r["food_security"]),
+                    float(r["health"]),
                     r["tech_stage"],
                     r["memory_long"],
+                    int(r["consecutive_extreme_eco"]),
+                    int(r["consecutive_extreme_unrest"]),
+                    int(r["consecutive_famine"]),
+                    int(r["consecutive_zero_stability"]),
                 )
                 for r in rows
             ]
@@ -803,6 +895,29 @@ class Database:
                 for r in rows
             ]
 
+    def list_all_delayed_effects(self) -> List[DelayedEffect]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT id, cycle_due, civ_id, kind, payload_json, created_at
+                FROM delayed_effects
+                ORDER BY id
+                """
+            )
+            rows = cur.fetchall()
+            return [
+                DelayedEffect(
+                    int(r["id"]),
+                    int(r["cycle_due"]),
+                    int(r["civ_id"]) if r["civ_id"] is not None else None,
+                    r["kind"],
+                    json.loads(r["payload_json"]),
+                    r["created_at"],
+                )
+                for r in rows
+            ]
+
     def add_applied_effect(
         self,
         cycle_applied: int,
@@ -842,6 +957,63 @@ class Database:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM delayed_effects WHERE id = ?", (effect_id,))
+            self._conn.commit()
+
+    def clear_delayed_effects(self) -> None:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM delayed_effects")
+            self._conn.commit()
+
+    def list_marks(self, civ_id: Optional[int]) -> List[str]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT label
+                FROM marks
+                WHERE scope = ? AND civ_id IS ?
+                ORDER BY label
+                """,
+                ("global" if civ_id is None else "civ", civ_id),
+            )
+            return [row["label"] for row in cur.fetchall()]
+
+    def add_mark(self, cycle: int, civ_id: Optional[int], label: str) -> None:
+        scope = "global" if civ_id is None else "civ"
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO marks (scope, civ_id, label, created_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """,
+                (scope, civ_id, label),
+            )
+            cur.execute(
+                """
+                INSERT INTO world_marks (cycle, civ_id, label, impact, created_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                """,
+                (cycle, civ_id, label, "added"),
+            )
+            self._conn.commit()
+
+    def remove_mark(self, cycle: int, civ_id: Optional[int], label: str) -> None:
+        scope = "global" if civ_id is None else "civ"
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "DELETE FROM marks WHERE scope = ? AND civ_id IS ? AND label = ?",
+                (scope, civ_id, label),
+            )
+            cur.execute(
+                """
+                INSERT INTO world_marks (cycle, civ_id, label, impact, created_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                """,
+                (cycle, civ_id, label, "removed"),
+            )
             self._conn.commit()
 
     def set_setting(self, key: str, value: str) -> None:
@@ -908,8 +1080,10 @@ class Database:
             cur.execute(
                 """
                 SELECT id, name, color, home_planet_id, level, status,
-                       extinct, cohesion, inequality, eco_pressure, innovation, stability,
-                       tech_stage, memory_long
+                       extinct, extinct_cycle, cohesion, inequality, eco_pressure, innovation, stability,
+                       food_security, health, tech_stage, memory_long,
+                       consecutive_extreme_eco, consecutive_extreme_unrest, consecutive_famine,
+                       consecutive_zero_stability
                 FROM civilizations
                 WHERE home_planet_id = ?
                 """,
@@ -926,13 +1100,20 @@ class Database:
                 row["level"],
                 row["status"],
                 int(row["extinct"]),
+                int(row["extinct_cycle"]) if row["extinct_cycle"] is not None else None,
                 float(row["cohesion"]),
                 float(row["inequality"]),
                 float(row["eco_pressure"]),
                 float(row["innovation"]),
                 float(row["stability"]),
+                float(row["food_security"]),
+                float(row["health"]),
                 row["tech_stage"],
                 row["memory_long"],
+                int(row["consecutive_extreme_eco"]),
+                int(row["consecutive_extreme_unrest"]),
+                int(row["consecutive_famine"]),
+                int(row["consecutive_zero_stability"]),
             )
 
     def list_events(self, limit: int = 500) -> List[Event]:
@@ -1023,8 +1204,9 @@ class Database:
 
             cur.execute(
                 """
-                SELECT id, name, color, home_planet_id, level, status, extinct,
-                       cohesion, inequality, eco_pressure, innovation, stability, tech_stage
+                SELECT id, name, color, home_planet_id, level, status, extinct, extinct_cycle,
+                       cohesion, inequality, eco_pressure, innovation, stability,
+                       food_security, health, tech_stage
                 FROM civilizations
                 ORDER BY id
                 """
@@ -1034,13 +1216,15 @@ class Database:
                 lines.append(
                     f"[CIV{row['id']}] {row['name']} | color={row['color']} | "
                     f"home=P{row['home_planet_id']} | level={row['level']} | status={row['status']} | "
-                    f"extinct={row['extinct']} | stage={row['tech_stage']}"
+                    f"extinct={row['extinct']} | extinct_cycle={row['extinct_cycle']} | "
+                    f"stage={row['tech_stage']}"
                 )
                 lines.append(
                     "  stats: "
                     f"coh={row['cohesion']:.2f}, ineq={row['inequality']:.2f}, "
                     f"eco={row['eco_pressure']:.2f}, inn={row['innovation']:.2f}, "
-                    f"stab={row['stability']:.2f}"
+                    f"stab={row['stability']:.2f}, food={row['food_security']:.2f}, "
+                    f"health={row['health']:.2f}"
                 )
             lines.append("")
 

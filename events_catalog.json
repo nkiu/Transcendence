@@ -1,0 +1,554 @@
+[
+  {
+    "id": "EVT_DROUGHT_REGIONAL",
+    "kind": "environment",
+    "scope": "civ",
+    "weight_base": 1.2,
+    "severity_range": [1,3],
+    "cooldown_cycles": 2,
+    "cannot_repeat_for": 2,
+    "preconditions": ["eco_pressure >= 0.45", "food_security <= 0.75"],
+    "effects": {
+      "deltas": {"food_security": -0.12, "eco_pressure": 0.08, "stability": -0.05},
+      "add_marks": ["DroughtPattern"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {"cycle_delay": 2, "deltas": {"inequality": 0.06}, "add_marks": [], "remove_marks": []}
+      ]
+    },
+    "notes": "Gradual climate stress. Compounds inequality later."
+  },
+  {
+    "id": "EVT_FLOODING_DELTA",
+    "kind": "environment",
+    "scope": "civ",
+    "weight_base": 0.9,
+    "severity_range": [1,3],
+    "cooldown_cycles": 2,
+    "cannot_repeat_for": 2,
+    "preconditions": ["eco_pressure >= 0.35", "stability <= 0.75"],
+    "effects": {
+      "deltas": {"food_security": -0.08, "health": -0.05, "eco_pressure": 0.05},
+      "add_marks": ["FloodDamage"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {"cycle_delay": 1, "deltas": {"stability": -0.04}, "add_marks": [], "remove_marks": []}
+      ]
+    },
+    "notes": "Infrastructure loss, secondary instability."
+  },
+  {
+    "id": "EVT_CROP_BLIGHT",
+    "kind": "health",
+    "scope": "civ",
+    "weight_base": 1.0,
+    "severity_range": [2,4],
+    "cooldown_cycles": 3,
+    "cannot_repeat_for": 3,
+    "preconditions": ["food_security <= 0.55", "health <= 0.75"],
+    "effects": {
+      "deltas": {"food_security": -0.18, "health": -0.10, "stability": -0.06},
+      "add_marks": ["BlightSeason"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {"cycle_delay": 2, "deltas": {"cohesion": -0.08}, "add_marks": [], "remove_marks": []}
+      ]
+    },
+    "notes": "Food shock with social consequences later."
+  },
+  {
+    "id": "EVT_EPIdemic_WAVE",
+    "kind": "health",
+    "scope": "civ",
+    "weight_base": 0.8,
+    "severity_range": [2,5],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["health <= 0.55"],
+    "effects": {
+      "deltas": {"health": -0.22, "stability": -0.08, "cohesion": -0.06},
+      "add_marks": ["EpidemicMemory"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {"cycle_delay": 3, "deltas": {"innovation": -0.08}, "add_marks": [], "remove_marks": []}
+      ]
+    },
+    "notes": "Epidemic reduces capacity and later slows innovation."
+  },
+  {
+    "id": "EVT_RATIONING_REGIME",
+    "kind": "policy",
+    "scope": "civ",
+    "weight_base": 0.9,
+    "severity_range": [1,3],
+    "cooldown_cycles": 2,
+    "cannot_repeat_for": 2,
+    "preconditions": ["food_security <= 0.45", "stability >= 0.25"],
+    "effects": {
+      "deltas": {"food_security": 0.08, "inequality": 0.07, "cohesion": -0.05},
+      "add_marks": ["RationingState"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Short-term food relief, long-term inequality and resentment."
+  },
+  {
+    "id": "EVT_BLACK_MARKET",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 1.1,
+    "severity_range": [1,4],
+    "cooldown_cycles": 3,
+    "cannot_repeat_for": 3,
+    "preconditions": ["has_mark(\"RationingState\")", "inequality >= 0.45"],
+    "effects": {
+      "deltas": {"inequality": 0.12, "stability": -0.06, "cohesion": -0.05},
+      "add_marks": ["BlackMarketNetworks"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"health": -0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Corruption and unsafe goods."
+  },
+  {
+    "id": "EVT_LAND_GRAB_ELITES",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 0.95,
+    "severity_range": [2,4],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["inequality >= 0.55", "stability <= 0.65"],
+    "effects": {
+      "deltas": {"inequality": 0.15, "cohesion": -0.10, "stability": -0.06},
+      "add_marks": ["LandGrab"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"food_security": -0.06}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Elite consolidation worsens cohesion."
+  },
+  {
+    "id": "EVT_LABOR_UPRISING",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.85,
+    "severity_range": [2,5],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["inequality >= 0.70", "cohesion <= 0.45"],
+    "effects": {
+      "deltas": {"stability": -0.15, "cohesion": -0.10, "innovation": -0.05},
+      "add_marks": ["Uprising"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 1, "deltas": {"health": -0.06}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Civil unrest reduces capacity."
+  },
+  {
+    "id": "EVT_SCAPEGOAT_PURGE",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.75,
+    "severity_range": [3,5],
+    "cooldown_cycles": 5,
+    "cannot_repeat_for": 5,
+    "preconditions": ["has_mark(\"Uprising\")", "stability <= 0.40"],
+    "effects": {
+      "deltas": {"cohesion": -0.18, "innovation": -0.12, "health": -0.08},
+      "add_marks": ["PurgeTrauma"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 3, "deltas": {"inequality": 0.08}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Violent repression creates long-term trauma."
+  },
+  {
+    "id": "EVT_CIVIL_WAR",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [4,5],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["cohesion <= 0.20", "stability <= 0.25"],
+    "effects": {
+      "deltas": {"stability": -0.25, "health": -0.12, "innovation": -0.10, "food_security": -0.10},
+      "add_marks": ["CivilWar"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"eco_pressure": 0.06}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Major conflict pushes toward collapse triggers."
+  },
+  {
+    "id": "EVT_COUP_D_ETAT",
+    "kind": "politics",
+    "scope": "civ",
+    "weight_base": 0.8,
+    "severity_range": [3,5],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["stability <= 0.35", "cohesion <= 0.50"],
+    "effects": {
+      "deltas": {"stability": -0.12, "cohesion": -0.08, "inequality": 0.05},
+      "add_marks": ["CoupRegime"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"innovation": -0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Power struggle and institutional shock."
+  },
+  {
+    "id": "EVT_AUTHORITARIAN_REFORMS",
+    "kind": "politics",
+    "scope": "civ",
+    "weight_base": 0.7,
+    "severity_range": [2,4],
+    "cooldown_cycles": 5,
+    "cannot_repeat_for": 5,
+    "preconditions": ["has_mark(\"CoupRegime\")"],
+    "effects": {
+      "deltas": {"stability": 0.10, "inequality": 0.12, "innovation": -0.08, "cohesion": -0.06},
+      "add_marks": ["AuthoritarianLock"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Stability bump with long-term damage."
+  },
+  {
+    "id": "EVT_RELIGIOUS_SCHISM",
+    "kind": "culture",
+    "scope": "civ",
+    "weight_base": 0.9,
+    "severity_range": [2,4],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["cohesion <= 0.55", "has_mark(\"CelestialCult\") or has_mark(\"SacredTaboo\") or has_mark(\"EpidemicMemory\")"],
+    "effects": {
+      "deltas": {"cohesion": -0.14, "stability": -0.06},
+      "add_marks": ["Schism"],
+      "remove_marks": ["UnifiedFaith"],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"inequality": 0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Belief fractures cohesion; may amplify inequality later."
+  },
+  {
+    "id": "EVT_CELESTIAL_OMEN",
+    "kind": "cosmic",
+    "scope": "civ",
+    "weight_base": 0.8,
+    "severity_range": [1,3],
+    "cooldown_cycles": 2,
+    "cannot_repeat_for": 2,
+    "preconditions": ["innovation <= 0.55", "eco_pressure >= 0.35"],
+    "effects": {
+      "deltas": {"cohesion": -0.04, "innovation": -0.03},
+      "add_marks": ["CelestialCult"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Mythic response to stress; undermines rational problem-solving."
+  },
+  {
+    "id": "EVT_SACRED_TABOO_FORMS",
+    "kind": "culture",
+    "scope": "civ",
+    "weight_base": 0.7,
+    "severity_range": [2,4],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["has_mark(\"CelestialCult\")", "stability <= 0.70"],
+    "effects": {
+      "deltas": {"innovation": -0.10, "stability": -0.04},
+      "add_marks": ["SacredTaboo"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Taboo blocks practical reforms and locks trajectory."
+  },
+  {
+    "id": "EVT_RITUAL_RESOURCE_WASTE",
+    "kind": "culture",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [2,4],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["has_mark(\"SacredTaboo\")", "food_security <= 0.70"],
+    "effects": {
+      "deltas": {"food_security": -0.10, "eco_pressure": 0.06, "cohesion": 0.03},
+      "add_marks": ["RitualWaste"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Ritual increases cohesion slightly but worsens resources."
+  },
+  {
+    "id": "EVT_IRRIGATION_PUSH",
+    "kind": "technology",
+    "scope": "civ",
+    "weight_base": 0.7,
+    "severity_range": [2,4],
+    "cooldown_cycles": 5,
+    "cannot_repeat_for": 5,
+    "preconditions": ["innovation >= 0.55", "food_security <= 0.60"],
+    "effects": {
+      "deltas": {"food_security": 0.10, "eco_pressure": 0.07, "inequality": 0.04},
+      "add_marks": ["IrrigationWorks"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 3, "deltas": {"eco_pressure": 0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Boost food but ecological overdraw later."
+  },
+  {
+    "id": "EVT_SOIL_SALINIZATION",
+    "kind": "environment",
+    "scope": "civ",
+    "weight_base": 0.7,
+    "severity_range": [2,5],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["has_mark(\"IrrigationWorks\")", "eco_pressure >= 0.65"],
+    "effects": {
+      "deltas": {"food_security": -0.14, "eco_pressure": 0.06, "stability": -0.05},
+      "add_marks": ["SalinizedFields"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Classic irrigation trap causing decline."
+  },
+  {
+    "id": "EVT_METAL_WORKING",
+    "kind": "technology",
+    "scope": "civ",
+    "weight_base": 0.55,
+    "severity_range": [2,4],
+    "cooldown_cycles": 10,
+    "cannot_repeat_for": 10,
+    "preconditions": ["innovation >= 0.70", "stability >= 0.35", "not has_mark(\"MetalWorking\")"],
+    "effects": {
+      "deltas": {"stability": 0.06, "innovation": 0.04, "inequality": 0.05},
+      "add_marks": ["MetalWorking"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 4, "deltas": {"eco_pressure": 0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Tech gain but increases extraction pressure later."
+  },
+  {
+    "id": "EVT_ARMED_ELITE",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [2,4],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["has_mark(\"MetalWorking\")", "inequality >= 0.60"],
+    "effects": {
+      "deltas": {"stability": -0.06, "cohesion": -0.08, "inequality": 0.06},
+      "add_marks": ["ArmedElite"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Militarized class accelerates internal conflict."
+  },
+  {
+    "id": "EVT_KNOWLEDGE_BURNING",
+    "kind": "culture",
+    "scope": "civ",
+    "weight_base": 0.5,
+    "severity_range": [3,5],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["stability <= 0.35", "has_mark(\"PurgeTrauma\") or has_mark(\"CivilWar\")"],
+    "effects": {
+      "deltas": {"innovation": -0.20, "cohesion": -0.06, "stability": -0.05},
+      "add_marks": ["LostArchives"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Anti-intellectual purge; deepens long-term decline."
+  },
+  {
+    "id": "EVT_REFORM_ATTEMPT",
+    "kind": "policy",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [1,4],
+    "cooldown_cycles": 5,
+    "cannot_repeat_for": 5,
+    "preconditions": ["innovation >= 0.60", "inequality >= 0.60", "stability >= 0.25"],
+    "effects": {
+      "deltas": {"inequality": -0.06, "cohesion": -0.03, "stability": -0.04},
+      "add_marks": ["ReformBacklash"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 1, "deltas": {"cohesion": -0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Reforms provoke backlash and short-term instability."
+  },
+  {
+    "id": "EVT_TECH_GUILD_CAPTURE",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 0.55,
+    "severity_range": [2,4],
+    "cooldown_cycles": 7,
+    "cannot_repeat_for": 7,
+    "preconditions": ["innovation >= 0.70", "inequality >= 0.65"],
+    "effects": {
+      "deltas": {"inequality": 0.10, "innovation": -0.05, "cohesion": -0.05},
+      "add_marks": ["GuildCapture"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Innovation becomes proprietary; society fractures."
+  },
+  {
+    "id": "EVT_RESOURCE_WARS",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.65,
+    "severity_range": [3,5],
+    "cooldown_cycles": 7,
+    "cannot_repeat_for": 7,
+    "preconditions": ["eco_pressure >= 0.75", "stability <= 0.45"],
+    "effects": {
+      "deltas": {"stability": -0.14, "cohesion": -0.10, "food_security": -0.10, "health": -0.06},
+      "add_marks": ["ResourceWar"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"inequality": 0.06}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Scarcity-driven conflict."
+  },
+  {
+    "id": "EVT_REFUGEE_CRISIS",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 0.75,
+    "severity_range": [2,4],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["has_mark(\"ResourceWar\") or has_mark(\"CivilWar\") or has_mark(\"DroughtPattern\")"],
+    "effects": {
+      "deltas": {"cohesion": -0.08, "health": -0.05, "inequality": 0.05},
+      "add_marks": ["RefugeeFlows"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Displacement stresses society."
+  },
+  {
+    "id": "EVT_HEATWAVE_DECADE",
+    "kind": "environment",
+    "scope": "global",
+    "weight_base": 0.55,
+    "severity_range": [2,4],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["not has_global(\"CosmicWinter\")"],
+    "effects": {
+      "deltas": {"eco_pressure": 0.04, "food_security": -0.03},
+      "add_marks": ["RisingHeatBaseline"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 3, "deltas": {"eco_pressure": 0.03}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Global stress: small but compounding."
+  },
+  {
+    "id": "EVT_COSMIC_RADIATION_SPIKE",
+    "kind": "cosmic",
+    "scope": "global",
+    "weight_base": 0.35,
+    "severity_range": [3,5],
+    "cooldown_cycles": 10,
+    "cannot_repeat_for": 10,
+    "preconditions": [],
+    "effects": {
+      "deltas": {"health": -0.05, "stability": -0.03},
+      "add_marks": ["CosmicInstability"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"innovation": -0.03}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Occasional global shock affecting all civs."
+  },
+  {
+    "id": "EVT_COMET_IMPACT_NEAR_MISS",
+    "kind": "cosmic",
+    "scope": "global",
+    "weight_base": 0.25,
+    "severity_range": [2,4],
+    "cooldown_cycles": 12,
+    "cannot_repeat_for": 12,
+    "preconditions": [],
+    "effects": {
+      "deltas": {"eco_pressure": 0.03, "stability": -0.02},
+      "add_marks": ["SkyTerror"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Rare global omen, slight stress increase."
+  },
+  {
+    "id": "EVT_COSMIC_WINTER",
+    "kind": "cosmic",
+    "scope": "global",
+    "weight_base": 0.15,
+    "severity_range": [4,5],
+    "cooldown_cycles": 20,
+    "cannot_repeat_for": 20,
+    "preconditions": ["has_global(\"CosmicInstability\")"],
+    "effects": {
+      "deltas": {"food_security": -0.10, "eco_pressure": 0.06, "health": -0.05},
+      "add_marks": ["CosmicWinter"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 4, "deltas": {"stability": -0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Hard global event, should create peaks."
+  },
+  {
+    "id": "EVT_TECH_BREAKTHROUGH_RISKY",
+    "kind": "technology",
+    "scope": "civ",
+    "weight_base": 0.35,
+    "severity_range": [2,4],
+    "cooldown_cycles": 12,
+    "cannot_repeat_for": 12,
+    "preconditions": ["innovation >= 0.80", "stability >= 0.35", "eco_pressure <= 0.80"],
+    "effects": {
+      "deltas": {"innovation": 0.08, "stability": 0.03, "inequality": 0.06},
+      "add_marks": ["RiskyBreakthrough"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"eco_pressure": 0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Breakthrough with downside; never pure positive."
+  },
+  {
+    "id": "EVT_TECH_ACCIDENT",
+    "kind": "technology",
+    "scope": "civ",
+    "weight_base": 0.45,
+    "severity_range": [2,5],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["has_mark(\"RiskyBreakthrough\")", "stability <= 0.65"],
+    "effects": {
+      "deltas": {"health": -0.12, "stability": -0.10, "innovation": -0.06},
+      "add_marks": ["TechAccident"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Downside materializes as accident."
+  },
+  {
+    "id": "EVT_CULT_OF_SALVATION",
+    "kind": "culture",
+    "scope": "civ",
+    "weight_base": 0.55,
+    "severity_range": [1,3],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["stability <= 0.55", "health <= 0.70"],
+    "effects": {
+      "deltas": {"cohesion": 0.04, "innovation": -0.05},
+      "add_marks": ["CultOfSalvation"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Coping mechanism: small cohesion gain, reduces innovation."
+  }
+]
