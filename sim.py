@@ -182,6 +182,7 @@ class Simulation:
                 planet.id,
                 "emerging",
                 "active",
+                0,
                 cohesion,
                 inequality,
                 eco_pressure,
@@ -569,6 +570,14 @@ class Simulation:
         summaries = []
         for effect in effects:
             self._apply_effect(effect)
+            self.db.add_applied_effect(
+                cycle_id,
+                effect.civ_id,
+                effect.kind,
+                effect.payload,
+                effect.id,
+                self._now(),
+            )
             self.db.delete_delayed_effect(effect.id)
             target = f"CIV{effect.civ_id}" if effect.civ_id else "global"
             summaries.append(f"{target}:{effect.kind}")

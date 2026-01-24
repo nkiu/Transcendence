@@ -45,6 +45,7 @@ class Civilization:
     home_planet_id: int
     level: str
     status: str
+    extinct: int
     cohesion: float
     inequality: float
     eco_pressure: float
@@ -72,6 +73,17 @@ class DelayedEffect:
     civ_id: Optional[int]
     kind: str
     payload: Dict[str, Any]
+    created_at: str
+
+
+@dataclass
+class AppliedEffect:
+    id: int
+    cycle_applied: int
+    civ_id: Optional[int]
+    kind: str
+    payload: Dict[str, Any]
+    source_effect_id: Optional[int]
     created_at: str
 
 
@@ -167,6 +179,7 @@ class Database:
                     home_planet_id INTEGER NOT NULL,
                     level TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    extinct INTEGER NOT NULL DEFAULT 0,
                     cohesion REAL NOT NULL DEFAULT 0.5,
                     inequality REAL NOT NULL DEFAULT 0.5,
                     eco_pressure REAL NOT NULL DEFAULT 0.5,
@@ -220,6 +233,20 @@ class Database:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS delayed_effects_applied (
+                    id INTEGER PRIMARY KEY,
+                    cycle_applied INTEGER NOT NULL,
+                    civ_id INTEGER,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    source_effect_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(civ_id) REFERENCES civilizations(id)
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS run_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -253,6 +280,7 @@ class Database:
             self._ensure_column("civilizations", "stability", "REAL", "0.5")
             self._ensure_column("civilizations", "tech_stage", "TEXT", "'stone'")
             self._ensure_column("civilizations", "memory_long", "TEXT", "''")
+            self._ensure_column("civilizations", "extinct", "INTEGER", "0")
 
     def _ensure_column(
         self, table: str, column: str, col_type: str, default: str
@@ -371,6 +399,7 @@ class Database:
         home_planet_id: int,
         level: str,
         status: str,
+        extinct: int,
         cohesion: float,
         inequality: float,
         eco_pressure: float,
@@ -389,6 +418,7 @@ class Database:
                     home_planet_id,
                     level,
                     status,
+                    extinct,
                     cohesion,
                     inequality,
                     eco_pressure,
@@ -397,7 +427,7 @@ class Database:
                     tech_stage,
                     memory_long
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -405,6 +435,7 @@ class Database:
                     home_planet_id,
                     level,
                     status,
+                    extinct,
                     cohesion,
                     inequality,
                     eco_pressure,
@@ -424,6 +455,7 @@ class Database:
         color: Optional[str] = None,
         level: Optional[str] = None,
         status: Optional[str] = None,
+        extinct: Optional[int] = None,
         cohesion: Optional[float] = None,
         inequality: Optional[float] = None,
         eco_pressure: Optional[float] = None,
@@ -446,6 +478,9 @@ class Database:
         if status:
             fields.append("status = ?")
             values.append(status)
+        if extinct is not None:
+            fields.append("extinct = ?")
+            values.append(extinct)
         if cohesion is not None:
             fields.append("cohesion = ?")
             values.append(cohesion)
@@ -550,7 +585,7 @@ class Database:
             cur.execute(
                 """
                 SELECT id, name, color, home_planet_id, level, status,
-                       cohesion, inequality, eco_pressure, innovation, stability,
+                       extinct, cohesion, inequality, eco_pressure, innovation, stability,
                        tech_stage, memory_long
                 FROM civilizations
                 ORDER BY id
@@ -565,6 +600,7 @@ class Database:
                     int(r["home_planet_id"]),
                     r["level"],
                     r["status"],
+                    int(r["extinct"]),
                     float(r["cohesion"]),
                     float(r["inequality"]),
                     float(r["eco_pressure"]),
@@ -767,6 +803,41 @@ class Database:
                 for r in rows
             ]
 
+    def add_applied_effect(
+        self,
+        cycle_applied: int,
+        civ_id: Optional[int],
+        kind: str,
+        payload: Dict[str, Any],
+        source_effect_id: Optional[int],
+        created_at: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO delayed_effects_applied (
+                    cycle_applied,
+                    civ_id,
+                    kind,
+                    payload_json,
+                    source_effect_id,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cycle_applied,
+                    civ_id,
+                    kind,
+                    json.dumps(payload),
+                    source_effect_id,
+                    created_at,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
     def delete_delayed_effect(self, effect_id: int) -> None:
         with self._lock:
             cur = self._conn.cursor()
@@ -837,7 +908,7 @@ class Database:
             cur.execute(
                 """
                 SELECT id, name, color, home_planet_id, level, status,
-                       cohesion, inequality, eco_pressure, innovation, stability,
+                       extinct, cohesion, inequality, eco_pressure, innovation, stability,
                        tech_stage, memory_long
                 FROM civilizations
                 WHERE home_planet_id = ?
@@ -854,6 +925,7 @@ class Database:
                 int(row["home_planet_id"]),
                 row["level"],
                 row["status"],
+                int(row["extinct"]),
                 float(row["cohesion"]),
                 float(row["inequality"]),
                 float(row["eco_pressure"]),
@@ -951,7 +1023,8 @@ class Database:
 
             cur.execute(
                 """
-                SELECT id, name, color, home_planet_id, level, status
+                SELECT id, name, color, home_planet_id, level, status, extinct,
+                       cohesion, inequality, eco_pressure, innovation, stability, tech_stage
                 FROM civilizations
                 ORDER BY id
                 """
@@ -960,7 +1033,14 @@ class Database:
             for row in cur.fetchall():
                 lines.append(
                     f"[CIV{row['id']}] {row['name']} | color={row['color']} | "
-                    f"home=P{row['home_planet_id']} | level={row['level']} | status={row['status']}"
+                    f"home=P{row['home_planet_id']} | level={row['level']} | status={row['status']} | "
+                    f"extinct={row['extinct']} | stage={row['tech_stage']}"
+                )
+                lines.append(
+                    "  stats: "
+                    f"coh={row['cohesion']:.2f}, ineq={row['inequality']:.2f}, "
+                    f"eco={row['eco_pressure']:.2f}, inn={row['innovation']:.2f}, "
+                    f"stab={row['stability']:.2f}"
                 )
             lines.append("")
 
@@ -1024,6 +1104,24 @@ class Database:
                 civ_part = f"CIV{row['civ_id']}" if row["civ_id"] is not None else "-"
                 lines.append(
                     f"[D{row['id']}] {civ_part} due=C{row['cycle_due']} {row['kind']} | {row['payload_json']}"
+                )
+            lines.append("")
+
+            cur.execute(
+                """
+                SELECT id, cycle_applied, civ_id, kind, payload_json, source_effect_id, created_at
+                FROM delayed_effects_applied
+                ORDER BY id
+                """
+            )
+            lines.append("== DELAYED EFFECTS APPLIED ==")
+            for row in cur.fetchall():
+                civ_part = f"CIV{row['civ_id']}" if row["civ_id"] is not None else "-"
+                source = row["source_effect_id"]
+                source_part = f"source=D{source}" if source else "source=-"
+                lines.append(
+                    f"[DA{row['id']}] {civ_part} C{row['cycle_applied']} {row['kind']} "
+                    f"| {row['payload_json']} | {source_part}"
                 )
             lines.append("")
 
