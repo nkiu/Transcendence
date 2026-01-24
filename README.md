@@ -11,7 +11,7 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 - Generates a 10‑system universe with planets and physical traits
 - Spawns multiple civilizations with evolving hidden stats + tech stages
 - Uses a deterministic rules engine to drive events + consequences
-- Uses a local LLM (Ollama) only as a narrator/scribe
+- Uses a local LLM (Ollama) only as a narrator/scribe (plain text, no JSON)
 - Displays a sci‑fi control panel UI (Tkinter) with live logs and visuals
 - Exports full simulation snapshots to `.txt`
 - Supports player directives that influence the next cycle
@@ -20,7 +20,7 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 ## Roles (who does what)
 
 - **Rules Engine (DND-like)**: the absolute supervisor of reality. It rolls events, applies consequences, tracks delayed effects, and handles extinction. It is deterministic with a seed.
-- **Civilization AI**: one instance per civ. Reacts only to the mechanical outcomes from the rules engine. Produces logs + optional updates (name/color/status).
+- **Civilization AI**: one instance per civ. Reacts only to the mechanical outcomes from the rules engine. Produces plain‑text logs only.
 - **Master AI**: the “vice‑god.” Summarizes the cycle using only the provided mechanical context. It never invents outcomes.
 
 ## Requirements
@@ -31,7 +31,7 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 ## Quick start
 
 ```bash
-python app.py
+python Transcendence.py
 ```
 
 The start screen lets you enable Ollama and pick a model without any exports.
@@ -42,12 +42,12 @@ If Ollama is off, the sim runs but produces minimal AI output.
 All key prompts are editable from the **Prompts** tab on the start screen:
 
 - Flavor (optional, currently unused)
-- Civ generation
-- Civ thoughts
-- Master narration
+- Civ seed (naming)
+- Civ narrator
+- Master observer
 
 These prompts are stored per save in SQLite and reloaded automatically when you **Load Game**.
-Defaults live in `prompts_design.py`, with alternate versions (e.g. `prompt_design_v2.py`).
+Defaults live in `prompts/prompts_design.py`, with alternate versions (e.g. `prompts/prompt_design_v4.py`).
 You can choose the prompt set at start, or keep the saved prompts from the DB.
 
 ## Player directives
@@ -63,7 +63,7 @@ You can inject a one‑off directive into the next cycle:
 
 - **Galaxy map**: systems, links, pulses, and events
 - **System panel**: orbiting planets + hover details
-- **Civ tabs**: live LLM streams per civilization + Master AI
+- **Civ tabs**: live LLM streams per civilization + Master AI (plain text)
 - **Stats tab**: cohesion, inequality, eco pressure, innovation, stability, food, health
 - **World tab**: scars, delayed effects, run settings
 - **Rules tab**: rules engine status (seed, cooldowns, marks, pending effects, recent rules events)
@@ -78,7 +78,7 @@ Click **Export** to write a full timeline snapshot next to the `.db`:
 YYYYMMDD_HHMMSS_<game>_cycle<N>.txt
 ```
 
-Includes cycles, systems, planets, civilizations, events, AI logs, world marks, delayed effects (queued + applied), rules state, and run settings.
+Includes cycles, systems, planets, civilizations, events, AI logs, world marks, delayed effects (queued + applied), cycle records, rules state, and run settings.
 
 ## Notes on simulation quality
 
@@ -86,7 +86,7 @@ LLMs are great at narrative flavor but can drift or invent state. This project k
 
 - A deterministic rules engine that owns reality
 - Hidden stats to stabilize continuity
-- Strict JSON outputs for LLM narration only
+- Strict plain‑text headers for LLM narration (LOG/GOD/TITLE/ANALYSIS)
 - Silence on extinction (no LLM output)
 
 ## Design philosophy
