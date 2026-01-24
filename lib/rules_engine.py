@@ -473,6 +473,7 @@ class RulesEngine:
         if (
             (civ.stats.cohesion == 0.0 and civ.stats.stability <= 0.05)
             or (civ.stats.food_security == 0.0 and civ.stats.health <= 0.05)
+            or (civ.stats.health <= 0.05 and civ.stats.food_security <= 0.10)
             or (civ.stats.cohesion == 0.0 and civ.stats.food_security == 0.0)
             or (civ.consecutive_zero_stability >= 2)
         ):
