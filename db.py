@@ -85,6 +85,19 @@ class WorldMark:
     created_at: str
 
 
+@dataclass
+class ChaosProfile:
+    id: int
+    cycle_start: int
+    cycle_end: int
+    civ_id: Optional[int]
+    archetype: str
+    polarity: str
+    bias_json: str
+    intensity: float
+    created_at: str
+
+
 class Database:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -210,6 +223,22 @@ class Database:
                 CREATE TABLE IF NOT EXISTS run_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chaos_profiles (
+                    id INTEGER PRIMARY KEY,
+                    cycle_start INTEGER NOT NULL,
+                    cycle_end INTEGER NOT NULL,
+                    civ_id INTEGER,
+                    archetype TEXT NOT NULL,
+                    polarity TEXT NOT NULL,
+                    bias_json TEXT NOT NULL,
+                    intensity REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(civ_id) REFERENCES civilizations(id)
                 )
                 """
             )
@@ -611,6 +640,89 @@ class Database:
                 for r in rows
             ]
 
+    def add_chaos_profile(
+        self,
+        cycle_start: int,
+        cycle_end: int,
+        civ_id: Optional[int],
+        archetype: str,
+        polarity: str,
+        bias_json: str,
+        intensity: float,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO chaos_profiles (
+                    cycle_start, cycle_end, civ_id, archetype, polarity,
+                    bias_json, intensity, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (cycle_start, cycle_end, civ_id, archetype, polarity, bias_json, intensity),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_active_chaos(self, cycle_id: int) -> List[ChaosProfile]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT id, cycle_start, cycle_end, civ_id, archetype, polarity,
+                       bias_json, intensity, created_at
+                FROM chaos_profiles
+                WHERE cycle_start <= ? AND cycle_end >= ?
+                ORDER BY id
+                """,
+                (cycle_id, cycle_id),
+            )
+            rows = cur.fetchall()
+            return [
+                ChaosProfile(
+                    int(r["id"]),
+                    int(r["cycle_start"]),
+                    int(r["cycle_end"]),
+                    int(r["civ_id"]) if r["civ_id"] is not None else None,
+                    r["archetype"],
+                    r["polarity"],
+                    r["bias_json"],
+                    float(r["intensity"]),
+                    r["created_at"],
+                )
+                for r in rows
+            ]
+
+    def list_recent_chaos(self, limit: int = 50) -> List[ChaosProfile]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT id, cycle_start, cycle_end, civ_id, archetype, polarity,
+                       bias_json, intensity, created_at
+                FROM chaos_profiles
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            return [
+                ChaosProfile(
+                    int(r["id"]),
+                    int(r["cycle_start"]),
+                    int(r["cycle_end"]),
+                    int(r["civ_id"]) if r["civ_id"] is not None else None,
+                    r["archetype"],
+                    r["polarity"],
+                    r["bias_json"],
+                    float(r["intensity"]),
+                    r["created_at"],
+                )
+                for r in rows
+            ]
+
     def add_delayed_effect(
         self,
         cycle_due: int,
@@ -919,6 +1031,23 @@ class Database:
             lines.append("== RUN SETTINGS ==")
             for row in cur.fetchall():
                 lines.append(f"{row['key']} = {row['value']}")
+            lines.append("")
+
+            cur.execute(
+                """
+                SELECT id, cycle_start, cycle_end, civ_id, archetype, polarity, bias_json, intensity
+                FROM chaos_profiles
+                ORDER BY id
+                """
+            )
+            lines.append("== CHAOS PROFILES ==")
+            for row in cur.fetchall():
+                civ_part = f"CIV{row['civ_id']}" if row["civ_id"] is not None else "-"
+                lines.append(
+                    f"[X{row['id']}] {civ_part} C{row['cycle_start']}-{row['cycle_end']} "
+                    f"{row['archetype']} {row['polarity']} intensity={row['intensity']:.2f}"
+                )
+                lines.append(f"  bias: {row['bias_json']}")
             lines.append("")
 
             return "\n".join(lines)
