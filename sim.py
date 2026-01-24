@@ -15,6 +15,7 @@ from prompts_design import (
 
 
 class Simulation:
+    """Orchestrates cycle progression, persistence, and LLM-driven narration."""
     def __init__(self, db: Database) -> None:
         self.db = db
         mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
@@ -25,6 +26,7 @@ class Simulation:
         self._ensure_universe()
 
     def run_cycles(self, count: int = 1) -> int:
+        """Run N full cycles without streaming callbacks."""
         if count < 1:
             return 0
         cycles_completed = 0
@@ -36,17 +38,22 @@ class Simulation:
     def run_cycle_stream(
         self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
     ) -> int:
+        """Run a single cycle and stream chunks to the UI."""
         return self._run_single_cycle(stream_callback)
 
     def _run_single_cycle(
         self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
     ) -> int:
+        """Cycle flow: civ turns → delayed effects → chaos → events → master narration."""
         cycle_id = self._create_cycle()
+        # 1) Civilizations respond and update state.
         civ_context, civ_summaries = self._run_civ_turns(
             cycle_id, stream_callback
         )
+        # 2) Apply queued effects and chaos distortions.
         effects_summary = self._apply_delayed_effects(cycle_id)
         chaos_summary = self._apply_chaos(cycle_id)
+        # 3) Event engine generates structured events.
         sim_context = f"{civ_context}\n{effects_summary}".strip()
         if chaos_summary:
             sim_context = f"{sim_context}\n{chaos_summary}"
@@ -68,10 +75,12 @@ class Simulation:
                 "assistant",
                 llm_meta.response or "LLM unavailable; no events generated.",
             )
+        # 4) Persist events and their side effects.
         self._store_simulation_artifacts(cycle_id, events)
         master_context = self._build_master_context(
             civ_summaries, sim_context, events
         )
+        # 5) Master AI narrates and titles the cycle.
         self._run_master_narration(
             cycle_id, master_context, stream_callback
         )
@@ -83,11 +92,13 @@ class Simulation:
         return self.db.add_cycle(now, now, "Cycle completed")
 
     def _ensure_universe(self) -> None:
+        """Create a fresh universe if the DB is empty."""
         if self.db.universe_exists():
             return
         self._seed_universe()
 
     def _seed_universe(self) -> None:
+        """Initial universe seeding: systems, planets, and first civilizations."""
         random.seed()
         systems: List[StarSystem] = []
         for i in range(10):
@@ -192,6 +203,7 @@ class Simulation:
         cycle_id: int,
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> tuple[str, list]:
+        """Advance civ state and collect their narrative responses."""
         if self.llm.mode == "stub":
             return "LLM disabled.", []
         player_directive = self._consume_player_directive(cycle_id)
@@ -363,6 +375,7 @@ class Simulation:
         master_context: str,
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> None:
+        """Stream the Master AI narrative and persist its outputs."""
         self._emit_stream(
             stream_callback,
             {
@@ -490,6 +503,7 @@ class Simulation:
     def _build_master_context(
         self, civ_summaries, sim_context: str, events: list
     ) -> str:
+        """Prepare a concise prompt for the Master AI."""
         lines = [sim_context, ""]
         if events:
             lines.append("Simulation events:")
@@ -498,6 +512,7 @@ class Simulation:
         return "\n".join(lines)
 
     def _store_simulation_artifacts(self, cycle_id: int, events: list) -> None:
+        """Persist events and store any attached metadata effects."""
         for event in events:
             self.db.add_event(
                 cycle_id,
@@ -547,6 +562,7 @@ class Simulation:
         return None
 
     def _apply_delayed_effects(self, cycle_id: int) -> str:
+        """Apply queued effects that mature this cycle."""
         effects = self.db.list_due_effects(cycle_id)
         if not effects:
             return "Delayed effects: none."
@@ -584,6 +600,7 @@ class Simulation:
         )
 
     def _apply_chaos(self, cycle_id: int) -> str:
+        """Apply rare, temporary bias profiles to create discontinuities."""
         if self.llm.mode == "stub":
             return ""
         if random.random() < 0.25:
