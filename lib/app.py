@@ -19,6 +19,7 @@ from prompts.prompts_design import (
     DEFAULT_EVENTS_PROMPT,
     DEFAULT_MASTER_PROMPT,
 )
+from rulesets import list_available_rulesets
 
 DEFAULT_MASTER_SEED = ""
 DEFAULT_CIV_SEED = ""
@@ -92,7 +93,7 @@ def _load_prompt_sets() -> dict:
     return prompt_sets
 
 
-def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
+def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
     os.makedirs("data", exist_ok=True)
     chooser = tk.Tk()
     chooser.withdraw()
@@ -102,6 +103,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
         "path": "",
         "ollama_on": True,
         "model": "",
+        "ruleset": "harsh_realism",
         "prompt_master": DEFAULT_MASTER_SEED,
         "prompt_civ": DEFAULT_CIV_SEED,
         "prompt_chaos": DEFAULT_CHAOS_SEED,
@@ -126,6 +128,8 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
         prompt_set_combo.set(default_prompt_set)
         prompt_set_label.configure(text=default_prompt_set)
         _apply_prompt_set(default_prompt_set)
+        ruleset_combo.set("harsh_realism")
+        selected["ruleset"] = "harsh_realism"
         db_preview_text.configure(state="normal")
         db_preview_text.delete("1.0", tk.END)
         db_preview_text.insert(
@@ -184,6 +188,9 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
             civ_gen_prompt.delete("1.0", tk.END)
             civ_thought_prompt.delete("1.0", tk.END)
             master_prompt.delete("1.0", tk.END)
+            ruleset_name = db.get_setting("ruleset_name") or "harsh_realism"
+            ruleset_combo.set(ruleset_name)
+            selected["ruleset"] = ruleset_name
             events_prompt.insert(
                 tk.END,
                 db.get_setting("prompt_events") or DEFAULT_EVENTS_PROMPT,
@@ -209,6 +216,8 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
         if not selected["path"]:
             messagebox.showinfo("Select game", "Pick or create a game first.")
             return
+        ruleset_name = ruleset_combo.get().strip() or "harsh_realism"
+        selected["ruleset"] = ruleset_name
         selected["prompt_master"] = DEFAULT_MASTER_SEED
         selected["prompt_civ"] = DEFAULT_CIV_SEED
         selected["prompt_chaos"] = DEFAULT_CHAOS_SEED
@@ -303,6 +312,16 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
 
     default_prompt_set = _pick_latest_prompt_set(prompt_set_keys)
     prompt_set_combo.set(default_prompt_set)
+
+    ruleset_row = tk.Frame(llm_frame)
+    ruleset_row.pack(fill="x", pady=(2, 4))
+    tk.Label(ruleset_row, text="Ruleset:").pack(side="left")
+    ruleset_values = [name for name, _desc in list_available_rulesets()]
+    ruleset_combo = ttk.Combobox(
+        ruleset_row, values=ruleset_values, state="readonly", width=24
+    )
+    ruleset_combo.pack(side="left", padx=6)
+    ruleset_combo.set("harsh_realism")
 
     tk.Button(llm_frame, text="Refresh Models", command=refresh_models).pack(
         anchor="w", pady=(4, 6)
@@ -476,6 +495,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
         selected["path"],
         selected["ollama_on"],
         selected["model"],
+        selected["ruleset"],
         selected["prompt_master"],
         selected["prompt_civ"],
         selected["prompt_chaos"],
@@ -488,6 +508,7 @@ def main() -> None:
         db_path,
         ollama_on,
         model,
+        ruleset_name,
         prompt_master,
         prompt_civ,
         prompt_chaos,
@@ -520,6 +541,7 @@ def main() -> None:
             db.set_setting("prompt_master", prompt_master)
             db.set_setting("prompt_civ", prompt_civ)
             db.set_setting("prompt_chaos", prompt_chaos)
+            db.set_setting("ruleset_name", ruleset_name or "harsh_realism")
             db.set_setting("prompt_events", templates["events"])
             db.set_setting("prompt_civ_gen", templates["civ_gen"])
             db.set_setting("prompt_civ_thought", templates["civ_thought"])
