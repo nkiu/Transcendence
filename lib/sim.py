@@ -193,6 +193,7 @@ class Simulation:
                 int(civ.id),
                 extinct=1 if civ.extinct or not civ.alive else 0,
                 extinct_cycle=civ.extinct_cycle,
+                status=self._derive_status(civ),
                 cohesion=civ.stats.cohesion,
                 inequality=civ.stats.inequality,
                 eco_pressure=civ.stats.eco_pressure,
@@ -1061,6 +1062,20 @@ class Simulation:
         if event.remove_marks:
             parts.append("remove_marks: " + ", ".join(event.remove_marks))
         return "; ".join(parts) if parts else "no direct effects"
+
+    def _derive_status(self, civ: CivilizationState) -> str:
+        if not civ.alive or civ.extinct:
+            return "dead"
+        stats = civ.stats
+        if stats.food_security <= 0.20 or stats.health <= 0.20:
+            return "famine"
+        if stats.stability <= 0.20 or stats.cohesion <= 0.20:
+            return "crisis"
+        if stats.eco_pressure >= 0.80 or stats.inequality >= 0.80:
+            return "unstable"
+        if stats.stability >= 0.70 and stats.cohesion >= 0.70:
+            return "stable"
+        return "strained"
 
     def _dedupe_civ_seeds(self, civs) -> list:
         seen = set()

@@ -739,21 +739,9 @@ class AppUI(UITabsMixin, tk.Frame):
             padding=(10, 4),
             font=("Consolas", 9, "bold"),
         )
-        style.configure(
-            "Dead.TNotebook.Tab",
-            background=self.theme["panel_alt"],
-            foreground=self.theme["danger"],
-            padding=(10, 4),
-            font=("Consolas", 9, "bold"),
-        )
         style.map(
             "TNotebook.Tab",
             background=[("selected", self.theme["accent"])],
-            foreground=[("selected", self.theme["bg"])],
-        )
-        style.map(
-            "Dead.TNotebook.Tab",
-            background=[("selected", self.theme["danger"])],
             foreground=[("selected", self.theme["bg"])],
         )
 

@@ -33,9 +33,8 @@ class UITabsMixin:
             self._insert_logs(text, list(reversed(logs)))
             if getattr(civ, "extinct", 0) and not logs:
                 text.insert(tk.END, "Dead civilization. Nothing remains.\n", "assistant")
-            self.civ_tabs.add(frame, text=civ.name)
-            if getattr(civ, "extinct", 0):
-                self.civ_tabs.tab(frame, style="Dead.TNotebook.Tab")
+            label = f"{civ.name} [DEAD]" if getattr(civ, "extinct", 0) else civ.name
+            self.civ_tabs.add(frame, text=label)
             self.log_texts[civ.id] = text
             self._civ_tab_ids[civ.id] = frame
 
