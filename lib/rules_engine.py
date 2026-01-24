@@ -44,6 +44,7 @@ class CivilizationState:
     name: str
     color: str
     alive: bool
+    extinct: bool
     extinct_cycle: Optional[int]
     stats: CivStats
     marks: List[str] = field(default_factory=list)
@@ -323,6 +324,7 @@ class RulesEngine:
             name="global",
             color="#000000",
             alive=True,
+            extinct=False,
             extinct_cycle=None,
             stats=CivStats(0, 0, 0, 0, 0, 0, 0),
             marks=[],
@@ -478,6 +480,7 @@ class RulesEngine:
             or (civ.consecutive_zero_stability >= 2)
         ):
             civ.alive = False
+            civ.extinct = True
             civ.extinct_cycle = universe.cycle
             if "Extinct" not in civ.marks:
                 civ.marks.append("Extinct")
@@ -495,6 +498,7 @@ class RulesEngine:
         outcome_kind = "shock"
         if roll in (1, 2, 12):
             civ.alive = False
+            civ.extinct = True
             civ.extinct_cycle = universe.cycle
             add_marks.append("Extinct")
             outcome_kind = "extinction"

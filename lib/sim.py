@@ -156,6 +156,7 @@ class Simulation:
                     name=civ.name,
                     color=civ.color,
                     alive=bool(civ.extinct == 0),
+                    extinct=bool(civ.extinct == 1),
                     extinct_cycle=civ.extinct_cycle,
                     stats=stats,
                     marks=self.db.list_marks(civ.id),
@@ -179,7 +180,7 @@ class Simulation:
         for civ in civ_states:
             self.db.update_civilization(
                 int(civ.id),
-                extinct=0 if civ.alive else 1,
+                extinct=1 if civ.extinct or not civ.alive else 0,
                 extinct_cycle=civ.extinct_cycle,
                 cohesion=civ.stats.cohesion,
                 inequality=civ.stats.inequality,
@@ -281,13 +282,17 @@ class Simulation:
     ) -> Dict[str, str]:
         logs: Dict[str, str] = {}
         for civ in civ_states:
-            if not civ.alive:
+            if not civ.alive or civ.extinct:
                 continue
             events = [e for e in civ_events if e.target == civ.id]
             context = self._build_civ_context(cycle_id, civ, events)
             if self.llm.mode == "stub":
                 logs[civ.id] = "LLM disabled."
                 continue
+            if civ.extinct or not civ.alive:
+                raise RuntimeError(
+                    f"LLM call blocked for extinct civ {civ.id} at cycle {cycle_id}"
+                )
             if stream_callback:
                 stream_callback(
                     {
@@ -331,6 +336,11 @@ class Simulation:
                         "role": "assistant",
                         "message": result.log if result else "",
                     }
+                )
+        for civ in civ_states:
+            if (civ.extinct or not civ.alive) and civ.id in logs:
+                raise RuntimeError(
+                    f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
                 )
         return logs
 
@@ -884,7 +894,7 @@ class Simulation:
         lines.append("Civilization reports:")
         extinct = []
         for civ in civ_states:
-            if civ.alive:
+            if civ.alive and civ.id in civ_logs:
                 log = civ_logs.get(civ.id, "No report.")
                 lines.append(f"- {civ.name}: {log}")
             else:
