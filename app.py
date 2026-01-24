@@ -1,7 +1,9 @@
 import glob
 import importlib.util
 import os
+import queue
 import re
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -382,26 +384,56 @@ def main() -> None:
     ) = select_db_path()
     if not db_path:
         return
-    os.environ["OLLAMA_ON"] = "1" if ollama_on else "0"
-    if model:
-        os.environ["OLLAMA_MODEL"] = model
-    db = Database(db_path)
-    db.set_setting("prompt_master", prompt_master)
-    db.set_setting("prompt_civ", prompt_civ)
-    db.set_setting("prompt_chaos", prompt_chaos)
-    db.set_setting("prompt_events", templates["events"])
-    db.set_setting("prompt_civ_gen", templates["civ_gen"])
-    db.set_setting("prompt_civ_thought", templates["civ_thought"])
-    db.set_setting("prompt_master_template", templates["master"])
-    sim = Simulation(db)
-
     root = tk.Tk()
     root.title("Transcendence - Universe Sim")
     root.geometry("1000x650")
+    loading = tk.Frame(root)
+    loading.pack(fill="both", expand=True)
+    tk.Label(
+        loading,
+        text="Initializing universe...\nThis may take a moment.",
+        font=("Consolas", 12),
+    ).pack(expand=True)
+    progress = ttk.Progressbar(loading, mode="indeterminate", length=240)
+    progress.pack(pady=10)
+    progress.start(10)
 
-    app = AppUI(root, sim)
-    app.pack(fill="both", expand=True)
+    init_queue: queue.Queue = queue.Queue()
 
+    def init_worker() -> None:
+        try:
+            os.environ["OLLAMA_ON"] = "1" if ollama_on else "0"
+            if model:
+                os.environ["OLLAMA_MODEL"] = model
+            db = Database(db_path)
+            db.set_setting("prompt_master", prompt_master)
+            db.set_setting("prompt_civ", prompt_civ)
+            db.set_setting("prompt_chaos", prompt_chaos)
+            db.set_setting("prompt_events", templates["events"])
+            db.set_setting("prompt_civ_gen", templates["civ_gen"])
+            db.set_setting("prompt_civ_thought", templates["civ_thought"])
+            db.set_setting("prompt_master_template", templates["master"])
+            sim = Simulation(db)
+            init_queue.put(("ok", sim))
+        except Exception as exc:
+            init_queue.put(("err", exc))
+
+    def check_init() -> None:
+        try:
+            status, payload = init_queue.get_nowait()
+        except queue.Empty:
+            root.after(100, check_init)
+            return
+        progress.stop()
+        loading.destroy()
+        if status == "err":
+            tk.Label(root, text=f"Init failed: {payload}").pack(pady=20)
+            return
+        app = AppUI(root, payload)
+        app.pack(fill="both", expand=True)
+
+    threading.Thread(target=init_worker, daemon=True).start()
+    root.after(100, check_init)
     root.mainloop()
 
 
