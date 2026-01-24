@@ -60,6 +60,7 @@ class Civilization:
     consecutive_extreme_unrest: int
     consecutive_famine: int
     consecutive_zero_stability: int
+    consecutive_good_cycles: int
 
 
 @dataclass
@@ -201,6 +202,7 @@ class Database:
                     consecutive_extreme_unrest INTEGER NOT NULL DEFAULT 0,
                     consecutive_famine INTEGER NOT NULL DEFAULT 0,
                     consecutive_zero_stability INTEGER NOT NULL DEFAULT 0,
+                    consecutive_good_cycles INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(home_planet_id) REFERENCES planets(id)
                 )
                 """
@@ -323,6 +325,7 @@ class Database:
             self._ensure_column("civilizations", "consecutive_extreme_unrest", "INTEGER", "0")
             self._ensure_column("civilizations", "consecutive_famine", "INTEGER", "0")
             self._ensure_column("civilizations", "consecutive_zero_stability", "INTEGER", "0")
+            self._ensure_column("civilizations", "consecutive_good_cycles", "INTEGER", "0")
 
     def _ensure_column(
         self, table: str, column: str, col_type: str, default: str
@@ -469,6 +472,7 @@ class Database:
         consecutive_extreme_unrest: int,
         consecutive_famine: int,
         consecutive_zero_stability: int,
+        consecutive_good_cycles: int,
     ) -> int:
         with self._lock:
             cur = self._conn.cursor()
@@ -494,9 +498,10 @@ class Database:
                     consecutive_extreme_eco,
                     consecutive_extreme_unrest,
                     consecutive_famine,
-                    consecutive_zero_stability
+                    consecutive_zero_stability,
+                    consecutive_good_cycles
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -519,6 +524,7 @@ class Database:
                     consecutive_extreme_unrest,
                     consecutive_famine,
                     consecutive_zero_stability,
+                    consecutive_good_cycles,
                 ),
             )
             self._conn.commit()
@@ -546,6 +552,7 @@ class Database:
         consecutive_extreme_unrest: Optional[int] = None,
         consecutive_famine: Optional[int] = None,
         consecutive_zero_stability: Optional[int] = None,
+        consecutive_good_cycles: Optional[int] = None,
     ) -> None:
         fields = []
         values = []
@@ -606,6 +613,9 @@ class Database:
         if consecutive_zero_stability is not None:
             fields.append("consecutive_zero_stability = ?")
             values.append(consecutive_zero_stability)
+        if consecutive_good_cycles is not None:
+            fields.append("consecutive_good_cycles = ?")
+            values.append(consecutive_good_cycles)
         if not fields:
             return
         values.append(civ_id)
@@ -692,7 +702,7 @@ class Database:
                        extinct, extinct_cycle, cohesion, inequality, eco_pressure, innovation, stability,
                        food_security, health, tech_stage, memory_long,
                        consecutive_extreme_eco, consecutive_extreme_unrest, consecutive_famine,
-                       consecutive_zero_stability
+                       consecutive_zero_stability, consecutive_good_cycles
                 FROM civilizations
                 ORDER BY id
                 """
@@ -721,6 +731,7 @@ class Database:
                     int(r["consecutive_extreme_unrest"]),
                     int(r["consecutive_famine"]),
                     int(r["consecutive_zero_stability"]),
+                    int(r["consecutive_good_cycles"]),
                 )
                 for r in rows
             ]
@@ -1104,7 +1115,7 @@ class Database:
                        extinct, extinct_cycle, cohesion, inequality, eco_pressure, innovation, stability,
                        food_security, health, tech_stage, memory_long,
                        consecutive_extreme_eco, consecutive_extreme_unrest, consecutive_famine,
-                       consecutive_zero_stability
+                       consecutive_zero_stability, consecutive_good_cycles
                 FROM civilizations
                 WHERE home_planet_id = ?
                 """,
@@ -1135,6 +1146,7 @@ class Database:
                 int(row["consecutive_extreme_unrest"]),
                 int(row["consecutive_famine"]),
                 int(row["consecutive_zero_stability"]),
+                int(row["consecutive_good_cycles"]),
             )
 
     def list_events(self, limit: int = 500) -> List[Event]:
