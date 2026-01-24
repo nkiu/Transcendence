@@ -32,6 +32,8 @@ class UITabsMixin:
             logs = self.sim.db.list_ai_logs("civ", civ.id, limit=120)
             self._insert_logs(text, list(reversed(logs)))
             self.civ_tabs.add(frame, text=civ.name)
+            if getattr(civ, "extinct", 0):
+                self.civ_tabs.tab(frame, style="Dead.TNotebook.Tab")
             self.log_texts[civ.id] = text
             self._civ_tab_ids[civ.id] = frame
 
