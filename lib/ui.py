@@ -52,6 +52,7 @@ class AppUI(UITabsMixin, tk.Frame):
         self._obituary_window = None
         self._obituary_text = None
         self._obituary_pending = False
+        self._obituary_blocks = []
         self._build()
         self._refresh_events()
         self._refresh_universe()
@@ -617,6 +618,7 @@ class AppUI(UITabsMixin, tk.Frame):
 
     def _on_obituaries_ready(self, payload) -> None:
         blocks = payload.get("blocks") or []
+        self._obituary_blocks = list(blocks)
         self.show_obituaries_window(blocks)
 
     def _parse_obituary_blocks(self, raw: str) -> Optional[List[str]]:
@@ -1013,6 +1015,12 @@ class AppUI(UITabsMixin, tk.Frame):
         filename = f"{timestamp}_{game_name}_cycle{cycle}.txt"
         path = os.path.join(base_dir, filename)
         content = self.sim.db.export_snapshot()
+        if self._obituary_blocks:
+            obituary_text = "\n\n".join(
+                block.strip() for block in self._obituary_blocks if block
+            ).strip()
+            if obituary_text:
+                content = f"{content}\n\n== OBITUARIES ==\n\n{obituary_text}\n"
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
