@@ -1038,7 +1038,7 @@ class Database:
     def list_ai_logs(self, scope: str, civ_id: Optional[int], limit: int = 200) -> List[AILog]:
         with self._lock:
             cur = self._conn.cursor()
-            if scope in ("master", "chaos"):
+            if scope in ("master", "chaos", "error"):
                 cur.execute(
                     """
                     SELECT id, scope, civ_id, cycle, role, message, created_at
