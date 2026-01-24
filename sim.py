@@ -1,10 +1,17 @@
 import datetime as dt
 import os
+import json
 import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 from db import Database, Planet, StarSystem
 from llm import LLMClient
+from prompts_design import (
+    DEFAULT_CIV_GEN_PROMPT,
+    DEFAULT_CIV_THOUGHT_PROMPT,
+    DEFAULT_EVENTS_PROMPT,
+    DEFAULT_MASTER_PROMPT,
+)
 
 
 class Simulation:
@@ -12,6 +19,8 @@ class Simulation:
         self.db = db
         mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
         self.llm = LLMClient(mode=mode)
+        self.prompt_seeds = self._load_prompt_seeds()
+        self.prompt_templates = self._load_prompt_templates()
         self._init_seed()
         self._ensure_universe()
 
@@ -37,8 +46,13 @@ class Simulation:
             cycle_id, stream_callback
         )
         effects_summary = self._apply_delayed_effects(cycle_id)
+        chaos_summary = self._apply_chaos(cycle_id)
         sim_context = f"{civ_context}\n{effects_summary}".strip()
-        events, llm_meta = self.llm.generate_events(cycle_id, sim_context)
+        if chaos_summary:
+            sim_context = f"{sim_context}\n{chaos_summary}"
+        events, llm_meta = self.llm.generate_events(
+            cycle_id, sim_context, template=self.prompt_templates["events"]
+        )
         if llm_meta:
             self.db.add_ai_log(
                 "master",
@@ -124,7 +138,9 @@ class Simulation:
         )[: random.randint(3, 4)]
         prompt_planets = [(p.name, p.habitability) for p in habitable]
         civs, llm_meta = self.llm.generate_civilizations(
-            prompt_planets, len(habitable)
+            prompt_planets,
+            len(habitable),
+            template=self.prompt_templates["civ_gen"],
         )
         if llm_meta:
             self.db.add_ai_log(
@@ -183,6 +199,7 @@ class Simulation:
         civ_summaries = []
         for civ in civs:
             stats = self._advance_civ_stats(civ)
+            stats = self._apply_breakthroughs(civ, stats)
             self.db.update_civilization(
                 civ.id,
                 cohesion=stats["cohesion"],
@@ -249,6 +266,8 @@ class Simulation:
                         "chunk": chunk,
                     },
                 ),
+                prompt_seed=self.prompt_seeds.get("civ", ""),
+                template=self.prompt_templates["civ_thought"],
             )
             if not result:
                 self._emit_stream(
@@ -352,6 +371,8 @@ class Simulation:
                     "chunk": chunk,
                 },
             ),
+            prompt_seed=self.prompt_seeds.get("master", ""),
+            template=self.prompt_templates["master"],
         )
         if master:
             self.db.add_ai_log("master", None, cycle_id, "prompt", master.prompt)
@@ -535,6 +556,180 @@ class Simulation:
             stability=stability,
         )
 
+    def _apply_chaos(self, cycle_id: int) -> str:
+        if self.llm.mode == "stub":
+            return ""
+        if random.random() < 0.25:
+            self._spawn_chaos_profile(cycle_id)
+        active = self.db.list_active_chaos(cycle_id)
+        if not active:
+            self.db.add_ai_log(
+                "chaos",
+                None,
+                cycle_id,
+                "status",
+                f"Cycle {cycle_id}: No chaotic events.",
+            )
+            return "Chaos: none."
+        summaries = []
+        for profile in active:
+            self._apply_chaos_bias(profile)
+            self.db.add_ai_log(
+                "chaos",
+                profile.civ_id,
+                cycle_id,
+                "profile",
+                (
+                    f"{profile.archetype} | {profile.polarity} | "
+                    f"intensity={profile.intensity:.2f} | "
+                    f"C{profile.cycle_start}-{profile.cycle_end} | "
+                    f"bias={profile.bias_json}"
+                ),
+            )
+            target = f"CIV{profile.civ_id}" if profile.civ_id else "global"
+            summaries.append(f"{target}:{profile.archetype}:{profile.polarity}")
+        return "Chaos active: " + ", ".join(summaries)
+
+    def _spawn_chaos_profile(self, cycle_id: int) -> None:
+        civs = self.db.list_civilizations()
+        target_global = random.random() < 0.5
+        civ = None if target_global else (random.choice(civs) if civs else None)
+        archetypes = ["Disruptor", "Pacifier", "Fanatic", "Deconstructor", "Symbolic"]
+        archetype = random.choice(archetypes)
+        polarity = self._pick_chaos_polarity()
+        intensity = round(random.uniform(0.2, 0.6), 2)
+        duration = random.randint(2, 4)
+        bias = self._build_bias_vector(polarity)
+        civ_id = civ.id if civ else None
+        self.db.add_chaos_profile(
+            cycle_id,
+            cycle_id + duration,
+            civ_id,
+            archetype,
+            polarity,
+            bias,
+            intensity,
+        )
+        self.db.add_world_mark(
+            cycle_id,
+            civ_id,
+            "Ideological distortion",
+            f"Subtle divergence ({polarity})",
+        )
+        self.db.add_ai_log(
+            "chaos",
+            civ_id,
+            cycle_id,
+            "spawn",
+            (
+                f"Cycle {cycle_id}: chaos profile spawned. "
+                f"target={'global' if civ_id is None else f'CIV{civ_id}'} "
+                f"archetype={archetype} polarity={polarity} "
+                f"duration={duration} intensity={intensity:.2f} bias={bias}"
+            ),
+        )
+        if random.random() < 0.5:
+            self._spawn_cosmic_event(cycle_id, civ_id)
+
+    def _build_bias_vector(self, polarity: str) -> str:
+        if polarity == "stabilizing":
+            bias = {"stability": 0.05, "cohesion": 0.04, "inequality": -0.03}
+        elif polarity == "destabilizing":
+            bias = {"stability": -0.06, "inequality": 0.05, "eco_pressure": 0.03}
+        else:
+            bias = {"innovation": 0.05, "stability": -0.02, "cohesion": 0.02}
+        return json.dumps(bias)
+
+    def _pick_chaos_polarity(self) -> str:
+        seed = self.prompt_seeds.get("chaos", "").lower()
+        if "stabil" in seed or "calm" in seed or "pacif" in seed:
+            choices = ["stabilizing", "ambiguous", "stabilizing"]
+        elif "disrupt" in seed or "chaos" in seed or "radical" in seed:
+            choices = ["destabilizing", "ambiguous", "destabilizing"]
+        else:
+            choices = ["stabilizing", "destabilizing", "ambiguous"]
+        return random.choice(choices)
+
+    def _apply_chaos_bias(self, profile) -> None:
+        if profile.civ_id is None:
+            return
+        civs = {civ.id: civ for civ in self.db.list_civilizations()}
+        civ = civs.get(profile.civ_id)
+        if not civ:
+            return
+        try:
+            bias = json.loads(profile.bias_json)
+        except json.JSONDecodeError:
+            return
+        intensity = profile.intensity
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+        cohesion = clamp(civ.cohesion + float(bias.get("cohesion", 0.0)) * intensity)
+        inequality = clamp(civ.inequality + float(bias.get("inequality", 0.0)) * intensity)
+        eco = clamp(civ.eco_pressure + float(bias.get("eco_pressure", 0.0)) * intensity)
+        innovation = clamp(civ.innovation + float(bias.get("innovation", 0.0)) * intensity)
+        stability = clamp(civ.stability + float(bias.get("stability", 0.0)) * intensity)
+        self.db.update_civilization(
+            civ.id,
+            cohesion=cohesion,
+            inequality=inequality,
+            eco_pressure=eco,
+            innovation=innovation,
+            stability=stability,
+        )
+
+    def _spawn_cosmic_event(self, cycle_id: int, civ_id: Optional[int]) -> None:
+        options = [
+            ("comet", "A luminous comet seeds rare minerals across the system."),
+            ("supernova", "A distant supernova shakes belief systems and myths."),
+            ("impact", "A rogue impact fractures a moon, exposing new resources."),
+            ("aurora", "Planetary auroras ignite a new scientific obsession."),
+            ("ruins", "Ancient debris field hints at forgotten civilizations."),
+        ]
+        kind, detail = random.choice(options)
+        title = f"Cosmic anomaly: {kind}"
+        metadata = {}
+        if kind in ("comet", "impact"):
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 2,
+                    "civ": civ_id,
+                    "kind": "resource_boom",
+                    "delta": {"innovation": 0.05, "eco_pressure": 0.04},
+                }
+            ]
+            metadata["world_marks"] = [
+                {"civ": civ_id, "label": "New mineral frontier", "impact": detail}
+            ]
+        elif kind == "supernova":
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 1,
+                    "civ": civ_id,
+                    "kind": "doubt_wave",
+                    "delta": {"stability": -0.05, "cohesion": -0.03},
+                }
+            ]
+            metadata["world_marks"] = [
+                {"civ": civ_id, "label": "Mythic doubt", "impact": detail}
+            ]
+        elif kind == "aurora":
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 1,
+                    "civ": civ_id,
+                    "kind": "research_surge",
+                    "delta": {"innovation": 0.06},
+                }
+            ]
+        self.db.add_event(cycle_id, "cosmic", title, detail, metadata)
+        self.db.add_ai_log(
+            "chaos",
+            civ_id,
+            cycle_id,
+            "cosmic",
+            f"{title} | {detail} | metadata={metadata}",
+        )
     def _init_seed(self) -> None:
         existing = self.db.get_setting("seed")
         if existing:
@@ -543,6 +738,23 @@ class Simulation:
         seed = random.randint(100000, 999999)
         self.db.set_setting("seed", str(seed))
         random.seed(seed)
+
+    def _load_prompt_seeds(self) -> dict:
+        return {
+            "master": self.db.get_setting("prompt_master") or "",
+            "civ": self.db.get_setting("prompt_civ") or "",
+            "chaos": self.db.get_setting("prompt_chaos") or "",
+        }
+
+    def _load_prompt_templates(self) -> dict:
+        return {
+            "events": self.db.get_setting("prompt_events") or DEFAULT_EVENTS_PROMPT,
+            "civ_gen": self.db.get_setting("prompt_civ_gen") or DEFAULT_CIV_GEN_PROMPT,
+            "civ_thought": self.db.get_setting("prompt_civ_thought")
+            or DEFAULT_CIV_THOUGHT_PROMPT,
+            "master": self.db.get_setting("prompt_master_template")
+            or DEFAULT_MASTER_PROMPT,
+        }
 
     def _advance_civ_stats(self, civ) -> dict:
         def clamp(value: float) -> float:
@@ -591,6 +803,19 @@ class Simulation:
         if random.random() < chance:
             return stages[idx + 1]
         return stage
+
+    def _apply_breakthroughs(self, civ, stats: dict) -> dict:
+        if stats["tech_stage"] == civ.tech_stage:
+            return stats
+        if stats["tech_stage"] == "space" and civ.tech_stage in (
+            "stone",
+            "bronze",
+            "iron",
+            "classical",
+        ):
+            if random.random() > 0.02:
+                stats["tech_stage"] = civ.tech_stage
+        return stats
 
     def _build_long_memory(self, civ, stats: dict, log: str) -> str:
         core = (
