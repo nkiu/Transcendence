@@ -74,6 +74,11 @@ CIV_THOUGHT_PROMPT = (
     "- name, color, level, status ONLY if you intentionally change them.\n\n"
 
     "Avoid language of balance, harmony, or resolution unless forced by context."
+    "Name rules:\n"
+    "- MUST be a unique proper name (not 'CIV-1', 'CIV-2', or 'Civilization X').\n"
+    "- Avoid generic placeholders; evoke culture, myth, geography, or language." \
+    "- If changing the name, ensure it reflects the civilization's current state." \
+    "- Name changes MUST be justified in the log. (for instance, was generic before and now more specific?)"
 )
 
 MASTER_PROMPT = (
