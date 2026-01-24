@@ -1,15 +1,17 @@
-EVENTS_PROMPT = (
-    "You write brief atmospheric flavor text for a simulation.\n"
+"""LLM outputs plain text only; simulator builds structured records."""
+
+FLAVOR_PROMPT = (
+    "You write brief atmospheric flavor text.\n"
     "You must NOT add events or consequences.\n"
-    "You can only rephrase and add sensory details to what is already in the context.\n"
-    "Context:\n{context}\n"
-    "Return plain text only using this exact format:\n"
+    "You can only rephrase and add sensory details to what is already in the context.\n\n"
+    "Use this exact format:\n"
     "FLAVOR:\n"
-    "<2-4 sentences>"
+    "<2-4 sentences>\n\n"
+    "Context:\n{context}\n"
 )
 
-CIV_GEN_PROMPT = (
-    "You are a science-fiction worldbuilder.\n\n"
+CIV_SEED_PROMPT = (
+    "You are a science-fiction worldbuilder.\n"
     "Create {count} unique civilizations for the following planets:\n"
     "{planets_list}\n\n"
     "Return PLAIN TEXT only using this exact block format for each civilization:\n"
@@ -24,7 +26,7 @@ CIV_GEN_PROMPT = (
     "- Valid hex color."
 )
 
-CIV_THOUGHT_PROMPT = (
+CIV_NARRATOR_PROMPT = (
     "You are the internal voice of the civilization \"{civ_name}\".\n"
     "You are NOT omniscient. You only know what your people experience.\n\n"
     "You must output PLAIN TEXT only. Do NOT output JSON, YAML, XML, or code blocks.\n\n"
@@ -34,8 +36,8 @@ CIV_THOUGHT_PROMPT = (
     "GOD:\n"
     "(1 short paragraph for the human observer, optional)\n\n"
     "Rules:\n"
-    "- Do not invent events. Only react to the 'applied_events' and the state given in the context.\n"
-    "- You may rationalize or misunderstand, but you cannot deny concrete outcomes (famine, illness, violence).\n"
+    "- React ONLY to applied_events and the current state in the context.\n"
+    "- Do not invent events. Do not deny concrete outcomes (famine, illness, violence).\n"
     "- If food_security <= 0.10 or health <= 0.10: write shorter, fragmented sentences.\n"
     "- If cohesion <= 0.10 or stability <= 0.10: show confusion, fear, contradictions.\n"
     "- Do not mention other civilizations as facts.\n\n"
@@ -43,7 +45,7 @@ CIV_THOUGHT_PROMPT = (
     "{context}\n"
 )
 
-MASTER_PROMPT = (
+MASTER_OBSERVER_PROMPT = (
     "You are the Master Observer of a simulated universe.\n"
     "You do NOT intervene. You do NOT propose solutions. You have no private memory.\n"
     "You only summarize what is observable THIS cycle from the provided context.\n\n"
