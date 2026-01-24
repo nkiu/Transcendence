@@ -1189,7 +1189,10 @@ class Database:
             lines = []
             lines.append("TRANSCENDENCE SNAPSHOT")
             ruleset = self.get_setting("ruleset_name") or "harsh_realism"
+            model = self.get_setting("llm_model") or ""
             lines.append(f"Ruleset: {ruleset}")
+            if model:
+                lines.append(f"LLM Model: {model}")
             lines.append("")
 
             cur.execute("SELECT id, started_at, ended_at, summary FROM cycles ORDER BY id")

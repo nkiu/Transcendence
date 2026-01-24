@@ -538,6 +538,7 @@ def main() -> None:
             if model:
                 os.environ["OLLAMA_MODEL"] = model
             db = Database(db_path)
+            db.set_setting("llm_model", model or "")
             db.set_setting("prompt_master", prompt_master)
             db.set_setting("prompt_civ", prompt_civ)
             db.set_setting("prompt_chaos", prompt_chaos)
