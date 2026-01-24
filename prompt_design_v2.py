@@ -48,7 +48,10 @@ CIV_GEN_PROMPT = (
     "Return a JSON list of objects with fields:\n"
     "- name\n"
     "- color (hex)\n"
-    "- summary (must clearly describe both the strength and the flaw)"
+    "- summary (must clearly describe both the strength and the flaw)\n\n"
+    "Name rules:\n"
+    "- MUST be a unique proper name (not 'CIV-1', 'CIV-2', or 'Civilization X').\n"
+    "- Avoid generic placeholders; evoke culture, myth, geography, or language."
 )
 
 CIV_THOUGHT_PROMPT = (
