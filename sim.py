@@ -75,6 +75,7 @@ class Simulation:
         self._run_master_narration(
             cycle_id, master_context, stream_callback
         )
+        self.db.set_setting("last_cycle", str(cycle_id))
         return cycle_id
 
     def _create_cycle(self) -> int:
@@ -193,6 +194,7 @@ class Simulation:
     ) -> tuple[str, list]:
         if self.llm.mode == "stub":
             return "LLM disabled.", []
+        player_directive = self._consume_player_directive(cycle_id)
         civs = self.db.list_civilizations()
         systems = {s.id: s for s in self.db.list_systems()}
         planets = {p.id: p for p in self.db.list_planets()}
@@ -240,6 +242,11 @@ class Simulation:
             if recent_logs:
                 short = " | ".join(log.message for log in reversed(recent_logs))
                 context_lines.append(f"Recent memory: {short}")
+            if player_directive and self._directive_applies(player_directive, civ):
+                context_lines.append(
+                    "Player directive (must be obeyed; include verbatim in log): "
+                    f"{player_directive['text']}"
+                )
             context = "\n".join(context_lines)
             self._emit_stream(
                 stream_callback,
@@ -269,6 +276,15 @@ class Simulation:
                 prompt_seed=self.prompt_seeds.get("civ", ""),
                 template=self.prompt_templates["civ_thought"],
             )
+            if player_directive and self._directive_applies(player_directive, civ):
+                result = self._enforce_player_directive(
+                    civ,
+                    cycle_id,
+                    context,
+                    result,
+                    player_directive["text"],
+                    stream_callback,
+                )
             if not result:
                 self._emit_stream(
                     stream_callback,
@@ -347,6 +363,17 @@ class Simulation:
         master_context: str,
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> None:
+        self._emit_stream(
+            stream_callback,
+            {
+                "type": "status",
+                "scope": "master",
+                "civ_id": "",
+                "cycle": str(cycle_id),
+                "role": "system",
+                "message": "Master AI is working...",
+            },
+        )
         self._emit_stream(
             stream_callback,
             {
@@ -745,6 +772,65 @@ class Simulation:
             "civ": self.db.get_setting("prompt_civ") or "",
             "chaos": self.db.get_setting("prompt_chaos") or "",
         }
+
+    def _consume_player_directive(self, cycle_id: int) -> Optional[dict]:
+        text = self.db.get_setting("player_directive_text") or ""
+        target = self.db.get_setting("player_directive_target") or ""
+        if not text.strip():
+            return None
+        self.db.set_setting("player_directive_text", "")
+        self.db.set_setting("player_directive_target", "")
+        self.db.add_ai_log(
+            "player",
+            None,
+            cycle_id,
+            "directive",
+            f"target={target} | {text.strip()}",
+        )
+        return {"text": text.strip(), "target": target.strip()}
+
+    def _directive_applies(self, directive: dict, civ) -> bool:
+        target = directive.get("target", "").strip().lower()
+        if target in ("", "all"):
+            return True
+        return target == civ.name.lower()
+
+    def _enforce_player_directive(
+        self,
+        civ,
+        cycle_id: int,
+        context: str,
+        result,
+        directive_text: str,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ):
+        if result and directive_text in result.log:
+            return result
+        enforced_context = (
+            f"{context}\n\nSTRICT RULE: You MUST include the directive text verbatim "
+            "inside the log and follow it."
+        )
+        retry = self.llm.generate_civ_thought(
+            civ.name,
+            cycle_id,
+            enforced_context,
+            on_chunk=lambda chunk, civ_id=civ.id: self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "civ",
+                    "civ_id": str(civ_id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": chunk,
+                },
+            ),
+            prompt_seed=self.prompt_seeds.get("civ", ""),
+            template=self.prompt_templates["civ_thought"],
+        )
+        if retry and directive_text in retry.log:
+            return retry
+        return result
 
     def _load_prompt_templates(self) -> dict:
         return {
