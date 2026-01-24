@@ -368,8 +368,9 @@ class AppUI(UITabsMixin, tk.Frame):
         self._refresh_universe()
         latest = self.sim.db.get_latest_cycle_id()
         civ_count = len(self.sim.db.list_civilizations())
+        ruleset = getattr(self.sim, "ruleset_name", "harsh_realism")
         self.status_var.set(
-            f"Cycle {latest} | Events {len(self.events)} | Civs {civ_count}"
+            f"Cycle {latest} | Events {len(self.events)} | Civs {civ_count} | Ruleset {ruleset}"
         )
         if latest == 0 and self._needs_init_message:
             self.info_text.delete("1.0", tk.END)
