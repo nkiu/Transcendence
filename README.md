@@ -10,17 +10,18 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 
 - Generates a 10‑system universe with planets and physical traits
 - Spawns multiple civilizations with evolving hidden stats + tech stages
-- Uses a local LLM (Ollama) to drive events + narration
+- Uses a deterministic rules engine to drive events + consequences
+- Uses a local LLM (Ollama) only as a narrator/scribe
 - Displays a sci‑fi control panel UI (Tkinter) with live logs and visuals
 - Exports full simulation snapshots to `.txt`
 - Supports player directives that influence the next cycle
-- Includes a Chaotic AI layer that biases trajectories without “villains”
+- Includes a rules layer with dice/thresholds and extinction logic
 
-## LLM roles (who does what)
+## Roles (who does what)
 
-- **Civilization AI**: one instance per civ. Reacts from local context only (stats, memory, planet). Produces logs + optional updates (name/color/status). It does not know other civs unless the simulation gives that info.
-- **Master AI**: the “vice‑god.” Builds the cycle title, narrates consequences, and analyzes the civ responses. It does not invent state directly; it reflects the simulation.
-- **Chaotic AI**: a hidden personality disturbance. Rare, local, and ambiguous. It biases a single civ’s trajectory for a few cycles (stabilizing or destabilizing) without being named in the narrative. You can see it in the UI; the Master AI cannot.
+- **Rules Engine (DND-like)**: the absolute supervisor of reality. It rolls events, applies consequences, tracks delayed effects, and handles extinction. It is deterministic with a seed.
+- **Civilization AI**: one instance per civ. Reacts only to the mechanical outcomes from the rules engine. Produces logs + optional updates (name/color/status).
+- **Master AI**: the “vice‑god.” Summarizes the cycle using only the provided mechanical context. It never invents outcomes.
 
 ## Requirements
 
@@ -40,7 +41,7 @@ If Ollama is off, the sim runs but produces minimal AI output.
 
 All key prompts are editable from the **Prompts** tab on the start screen:
 
-- Events (simulation engine)
+- Flavor (optional, currently unused)
 - Civ generation
 - Civ thoughts
 - Master narration
@@ -63,9 +64,9 @@ You can inject a one‑off directive into the next cycle:
 - **Galaxy map**: systems, links, pulses, and events
 - **System panel**: orbiting planets + hover details
 - **Civ tabs**: live LLM streams per civilization + Master AI
-- **Stats tab**: cohesion, inequality, eco pressure, innovation, stability
+- **Stats tab**: cohesion, inequality, eco pressure, innovation, stability, food, health
 - **World tab**: scars, delayed effects, run settings
-- **Chaos tab**: chaotic profile logs (separate from Master view)
+- **Rules tab**: rules engine status (seed, cooldowns, marks, pending effects, recent rules events)
 - **Player directive**: queued input applied at next cycle
 - **Loading screen**: non‑blocking initialization for new runs
 
@@ -77,16 +78,16 @@ Click **Export** to write a full timeline snapshot next to the `.db`:
 YYYYMMDD_HHMMSS_<game>_cycle<N>.txt
 ```
 
-Includes cycles, systems, planets, civilizations, events, AI logs, world marks, delayed effects, chaos profiles, and run settings.
+Includes cycles, systems, planets, civilizations, events, AI logs, world marks, delayed effects (queued + applied), rules state, and run settings.
 
 ## Notes on simulation quality
 
 LLMs are great at narrative flavor but can drift or invent state. This project keeps:
 
-- Hidden stats and tech stages to stabilize continuity
-- Strict JSON outputs for simulation steps
-- Master narration that reflects simulation rather than rewriting it
-- Room for noise and mistakes as part of the experiment
+- A deterministic rules engine that owns reality
+- Hidden stats to stabilize continuity
+- Strict JSON outputs for LLM narration only
+- Silence on extinction (no LLM output)
 
 ## Design philosophy
 
