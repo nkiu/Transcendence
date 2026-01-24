@@ -1188,6 +1188,8 @@ class Database:
             cur = self._conn.cursor()
             lines = []
             lines.append("TRANSCENDENCE SNAPSHOT")
+            ruleset = self.get_setting("ruleset_name") or "harsh_realism"
+            lines.append(f"Ruleset: {ruleset}")
             lines.append("")
 
             cur.execute("SELECT id, started_at, ended_at, summary FROM cycles ORDER BY id")
