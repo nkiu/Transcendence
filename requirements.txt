@@ -1,0 +1,2 @@
+# This project uses only the Python standard library.
+# Ollama is run as a separate local service (not a Python package).
