@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from lib.db import Database, Planet, StarSystem
 from lib.llm import LLMClient
+from lib.narrative_parser import parse_sections
 from lib.rules_engine import (
     AppliedEvent,
     CivilizationState,
@@ -34,6 +35,7 @@ class Simulation:
         catalog_path = os.path.join(os.path.dirname(__file__), "events_catalog.json")
         self.rules_engine = RulesEngine(catalog_path, self.seed)
         self._ensure_universe()
+        self.LEGACY_JSON_MODE = False
 
     def run_cycles(self, count: int = 1) -> int:
         """Run N full cycles without streaming callbacks."""
@@ -82,11 +84,20 @@ class Simulation:
             self.db.set_setting("last_cycle", str(cycle_id))
             return cycle_id
 
-        civ_logs = self._run_civ_scribes(
+        civ_reports = self._run_civ_scribes(
             cycle_id, civ_states, civ_events, stream_callback
         )
-        self._run_master_scribe(
-            cycle_id, civ_states, global_events, civ_logs, stream_callback
+        master_report = self._run_master_scribe(
+            cycle_id, civ_states, global_events, civ_reports, stream_callback
+        )
+        self._store_cycle_record(
+            cycle_id,
+            civ_states,
+            universe_state,
+            civ_events,
+            global_events,
+            civ_reports,
+            master_report,
         )
         self.db.set_setting("last_cycle", str(cycle_id))
         return cycle_id
@@ -279,15 +290,20 @@ class Simulation:
         civ_states: List[CivilizationState],
         civ_events: List[AppliedEvent],
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
-    ) -> Dict[str, str]:
-        logs: Dict[str, str] = {}
+    ) -> Dict[str, Dict[str, str]]:
+        reports: Dict[str, Dict[str, str]] = {}
         for civ in civ_states:
             if not civ.alive or civ.extinct:
                 continue
             events = [e for e in civ_events if e.target == civ.id]
             context = self._build_civ_context(cycle_id, civ, events)
             if self.llm.mode == "stub":
-                logs[civ.id] = "LLM disabled."
+                reports[civ.id] = {
+                    "log_text": "LLM disabled.",
+                    "god_text": "",
+                    "model": "",
+                    "latency_ms": "0",
+                }
                 continue
             if civ.extinct or not civ.alive:
                 raise RuntimeError(
@@ -321,10 +337,26 @@ class Simulation:
                 template=self.prompt_templates["civ_thought"],
             )
             if result:
-                self._log_llm_parse_issue("civ", int(civ.id), cycle_id, result.response)
-                logs[civ.id] = result.log
-                self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", result.log)
-                self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", result.god)
+                sections = parse_sections(result.response, ["LOG", "GOD"])
+                log_text = sections.get("LOG", "").strip()
+                god_text = sections.get("GOD", "").strip()
+                self._log_llm_format_issue(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    result.response,
+                    required_headers=["LOG"],
+                )
+                if log_text:
+                    reports[civ.id] = {
+                        "log_text": log_text,
+                        "god_text": god_text,
+                        "model": result.model,
+                        "latency_ms": str(result.latency_ms),
+                    }
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
+                    if god_text:
+                        self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
                 self.db.add_ai_log("civ", int(civ.id), cycle_id, "prompt", result.prompt)
             if stream_callback:
                 stream_callback(
@@ -334,30 +366,30 @@ class Simulation:
                         "civ_id": civ.id,
                         "cycle": cycle_id,
                         "role": "assistant",
-                        "message": result.log if result else "",
+                        "message": reports.get(civ.id, {}).get("log_text", ""),
                     }
                 )
         for civ in civ_states:
-            if (civ.extinct or not civ.alive) and civ.id in logs:
+            if (civ.extinct or not civ.alive) and civ.id in reports:
                 raise RuntimeError(
                     f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
                 )
-        return logs
+        return reports
 
     def _run_master_scribe(
         self,
         cycle_id: int,
         civ_states: List[CivilizationState],
         global_events: List[AppliedEvent],
-        civ_logs: Dict[str, str],
+        civ_reports: Dict[str, Dict[str, str]],
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
-    ) -> None:
+    ) -> Dict[str, str]:
         if self._universe_ended():
-            return
+            raise RuntimeError(f"Master LLM called after universe ended at C{cycle_id}")
         if self.llm.mode == "stub":
-            return
+            return {"title": "", "log_text": "", "analysis_text": "", "god_text": ""}
         context = self._build_master_context_v2(
-            cycle_id, civ_states, global_events, civ_logs
+            cycle_id, civ_states, global_events, civ_reports
         )
         if stream_callback:
             stream_callback(
@@ -386,11 +418,59 @@ class Simulation:
             template=self.prompt_templates["master"],
         )
         if result:
-            self._log_llm_parse_issue("master", None, cycle_id, result.response)
-            self.db.add_ai_log("master", None, cycle_id, "assistant", result.log)
-            self.db.add_ai_log("master", None, cycle_id, "god", result.god)
+            sections = parse_sections(
+                result.response, ["TITLE", "LOG", "ANALYSIS", "GOD"]
+            )
+            title = sections.get("TITLE", "").strip() or f"Cycle {cycle_id}"
+            log_text = sections.get("LOG", "").strip()
+            analysis_text = sections.get("ANALYSIS", "").strip()
+            god_text = sections.get("GOD", "").strip()
+            self._log_llm_format_issue(
+                "master",
+                None,
+                cycle_id,
+                result.response,
+                required_headers=["TITLE", "LOG", "ANALYSIS"],
+            )
+            if log_text:
+                self.db.add_ai_log("master", None, cycle_id, "assistant", log_text)
+            if analysis_text:
+                self.db.add_ai_log("master", None, cycle_id, "analysis", analysis_text)
+            if god_text:
+                self.db.add_ai_log("master", None, cycle_id, "god", god_text)
             self.db.add_ai_log("master", None, cycle_id, "prompt", result.prompt)
-            self.db.update_cycle_summary(cycle_id, result.title)
+            self.db.update_cycle_summary(cycle_id, title)
+            if stream_callback:
+                stream_callback(
+                    {
+                        "type": "log_end",
+                        "scope": "master",
+                        "civ_id": None,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                        "message": log_text,
+                    }
+                )
+            return {
+                "title": title,
+                "log_text": log_text,
+                "analysis_text": analysis_text,
+                "god_text": god_text,
+                "model": result.model,
+                "latency_ms": str(result.latency_ms),
+            }
+        if stream_callback:
+            stream_callback(
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": None,
+                    "cycle": cycle_id,
+                    "role": "assistant",
+                    "message": "",
+                }
+            )
+        return {"title": "", "log_text": "", "analysis_text": "", "god_text": ""}
         if stream_callback:
             stream_callback(
                 {
@@ -511,6 +591,7 @@ class Simulation:
             len(habitable),
             template=self.prompt_templates["civ_gen"],
         )
+        civs = self._dedupe_civ_seeds(civs)
         if llm_meta:
             self.db.add_ai_log(
                 "master",
@@ -571,6 +652,8 @@ class Simulation:
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> tuple[str, list]:
         """Advance civ state and collect their narrative responses."""
+        if not self.LEGACY_JSON_MODE:
+            raise RuntimeError("Legacy JSON mode disabled in V3_DND.")
         if self.llm.mode == "stub":
             return "LLM disabled.", []
         player_directive = self._consume_player_directive(cycle_id)
@@ -743,6 +826,8 @@ class Simulation:
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> None:
         """Stream the Master AI narrative and persist its outputs."""
+        if not self.LEGACY_JSON_MODE:
+            raise RuntimeError("Legacy JSON mode disabled in V3_DND.")
         self._emit_stream(
             stream_callback,
             {
@@ -880,7 +965,7 @@ class Simulation:
         cycle_id: int,
         civ_states: List[CivilizationState],
         global_events: List[AppliedEvent],
-        civ_logs: Dict[str, str],
+        civ_reports: Dict[str, Dict[str, str]],
     ) -> str:
         lines = [f"Cycle {cycle_id} summary:"]
         if global_events:
@@ -894,15 +979,16 @@ class Simulation:
         lines.append("Civilization reports:")
         extinct = []
         for civ in civ_states:
-            if civ.alive and civ.id in civ_logs:
-                log = civ_logs.get(civ.id, "No report.")
+            if civ.alive and civ.id in civ_reports:
+                log = civ_reports.get(civ.id, {}).get("log_text") or "No report."
                 lines.append(f"- {civ.name}: {log}")
             else:
                 extinct.append(civ.id)
         if extinct:
             lines.append("")
             for civ_id in extinct:
-                lines.append(f"No signals detected from CIV{civ_id}.")
+                civ_name = next((c.name for c in civ_states if c.id == civ_id), civ_id)
+                lines.append(f"No signals detected from {civ_name}.")
         return "\n".join(lines)
 
     def _store_simulation_artifacts(self, cycle_id: int, events: list) -> None:
@@ -976,6 +1062,85 @@ class Simulation:
             parts.append("remove_marks: " + ", ".join(event.remove_marks))
         return "; ".join(parts) if parts else "no direct effects"
 
+    def _dedupe_civ_seeds(self, civs) -> list:
+        seen = set()
+        deduped = []
+        for idx, civ in enumerate(civs, start=1):
+            name = civ.name.strip() if civ.name else ""
+            if not name or name in seen:
+                name = f"CIV-{idx}"
+            seen.add(name)
+            deduped.append(
+                type(civ)(name=name, color=civ.color, summary=civ.summary)
+            )
+        return deduped
+
+    def _event_to_dict(self, event: AppliedEvent) -> Dict[str, object]:
+        return {
+            "event_id": event.event_id,
+            "kind": event.kind,
+            "scope": event.scope,
+            "severity": event.severity,
+            "target": event.target,
+            "deltas": event.deltas,
+            "add_marks": event.add_marks,
+            "remove_marks": event.remove_marks,
+        }
+
+    def _store_cycle_record(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        universe_state: UniverseState,
+        civ_events: List[AppliedEvent],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+        master_report: Dict[str, str],
+    ) -> None:
+        record = {
+            "cycle": cycle_id,
+            "rng_seed": universe_state.rng_seed,
+            "global": {
+                "global_marks": list(universe_state.global_marks),
+                "global_events_applied": [self._event_to_dict(e) for e in global_events],
+            },
+            "civilizations": [],
+            "master": {
+                "title": master_report.get("title", ""),
+                "log_text": master_report.get("log_text", ""),
+                "analysis_text": master_report.get("analysis_text", ""),
+                "god_text": master_report.get("god_text", ""),
+                "meta": {
+                    "llm_model": master_report.get("model", ""),
+                    "latency_ms": master_report.get("latency_ms", ""),
+                },
+            },
+        }
+        for civ in civ_states:
+            applied = [self._event_to_dict(e) for e in civ_events if e.target == civ.id]
+            narrative = civ_reports.get(civ.id, {})
+            record["civilizations"].append(
+                {
+                    "civ_id": civ.id,
+                    "name": civ.name,
+                    "color": civ.color,
+                    "alive": civ.alive and not civ.extinct,
+                    "extinct_cycle": civ.extinct_cycle,
+                    "stats": civ.stats.as_dict(),
+                    "world_marks": list(civ.marks),
+                    "applied_events": applied,
+                    "narrative": {
+                        "log_text": narrative.get("log_text", ""),
+                        "god_text": narrative.get("god_text", ""),
+                    },
+                    "meta": {
+                        "llm_model": narrative.get("model", ""),
+                        "latency_ms": narrative.get("latency_ms", ""),
+                    },
+                }
+            )
+        self.db.add_cycle_record(cycle_id, record)
+
     def _force_event(self, cycle_id: int, event_id: str, target: str) -> None:
         event = None
         for item in self.rules_engine.events:
@@ -1000,30 +1165,38 @@ class Simulation:
             [],
         )
 
-    def _log_llm_parse_issue(
+    def _log_llm_format_issue(
         self,
         scope: str,
         civ_id: Optional[int],
         cycle_id: int,
         response: Optional[str],
+        required_headers: List[str],
     ) -> None:
         if not response:
             return
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`").strip()
-        try:
-            json.loads(cleaned)
+        missing = []
+        upper = response.upper()
+        for header in required_headers:
+            if f"{header}:" not in upper:
+                missing.append(header)
+        contains_json = "{" in response and "}" in response
+        if not missing and not contains_json:
             return
-        except json.JSONDecodeError:
-            snippet = cleaned.replace("\n", " ")[:400]
-            self.db.add_ai_log(
-                "error",
-                civ_id,
-                cycle_id,
-                "parse",
-                f"{scope} JSON parse failed: {snippet}",
-            )
+        snippet = response.replace("\n", " ")[:400]
+        parts = []
+        if missing:
+            parts.append(f"missing headers: {', '.join(missing)}")
+        if contains_json:
+            parts.append("json_detected")
+        detail = " | ".join(parts) if parts else "format issue"
+        self.db.add_ai_log(
+            "error",
+            civ_id,
+            cycle_id,
+            "format",
+            f"{scope} {detail} | {snippet}",
+        )
 
     def _now(self) -> str:
         return dt.datetime.utcnow().isoformat() + "Z"

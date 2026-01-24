@@ -31,6 +31,8 @@ class UITabsMixin:
             text.pack(fill="both", expand=True)
             logs = self.sim.db.list_ai_logs("civ", civ.id, limit=120)
             self._insert_logs(text, list(reversed(logs)))
+            if getattr(civ, "extinct", 0) and not logs:
+                text.insert(tk.END, "Dead civilization. Nothing remains.\n", "assistant")
             self.civ_tabs.add(frame, text=civ.name)
             if getattr(civ, "extinct", 0):
                 self.civ_tabs.tab(frame, style="Dead.TNotebook.Tab")
@@ -222,6 +224,12 @@ class UITabsMixin:
                 lines.append(f"[C{event.cycle}] {event_id} :: sev={severity} :: {target}")
         else:
             lines.append("(none)")
+        lines.append("")
+        lines.append("== CIV MARKS ==")
+        civs = self.sim.db.list_civilizations()
+        for civ in civs:
+            marks = self.sim.db.list_marks(civ.id)
+            lines.append(f"{civ.name}: " + (", ".join(marks) if marks else "(none)"))
 
         text.insert(tk.END, "\n".join(lines))
         self.chaos_text = text

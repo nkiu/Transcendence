@@ -32,14 +32,16 @@ def _load_prompt_sets() -> dict:
 
     def extract_templates(module) -> dict:
         keys = [
-            ("EVENTS_PROMPT", "DEFAULT_EVENTS_PROMPT"),
-            ("CIV_GEN_PROMPT", "DEFAULT_CIV_GEN_PROMPT"),
-            ("CIV_THOUGHT_PROMPT", "DEFAULT_CIV_THOUGHT_PROMPT"),
-            ("MASTER_PROMPT", "DEFAULT_MASTER_PROMPT"),
+            ("EVENTS_PROMPT", "DEFAULT_EVENTS_PROMPT", "FLAVOR_PROMPT"),
+            ("CIV_GEN_PROMPT", "DEFAULT_CIV_GEN_PROMPT", "CIV_SEED_PROMPT"),
+            ("CIV_THOUGHT_PROMPT", "DEFAULT_CIV_THOUGHT_PROMPT", "CIV_NARRATOR_PROMPT"),
+            ("MASTER_PROMPT", "DEFAULT_MASTER_PROMPT", "MASTER_OBSERVER_PROMPT"),
         ]
         templates = {}
-        for primary, fallback in keys:
+        for primary, fallback, alt in keys:
             exact = getattr(module, primary, None)
+            if exact is None:
+                exact = getattr(module, alt, None)
             if exact is None:
                 exact = getattr(module, fallback, None)
             if isinstance(exact, str):

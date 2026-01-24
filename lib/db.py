@@ -296,6 +296,14 @@ class Database:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cycle_records (
+                    cycle INTEGER PRIMARY KEY,
+                    record_json TEXT NOT NULL
+                )
+                """
+            )
             self._conn.commit()
             self._ensure_column("planets", "kind", "TEXT", "'rocky'")
             self._ensure_column("planets", "richness", "REAL", "0.0")
@@ -376,6 +384,19 @@ class Database:
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def add_cycle_record(self, cycle: int, record: Dict[str, Any]) -> None:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO cycle_records (cycle, record_json)
+                VALUES (?, ?)
+                ON CONFLICT(cycle) DO UPDATE SET record_json = excluded.record_json
+                """,
+                (cycle, json.dumps(record)),
+            )
+            self._conn.commit()
 
     def universe_exists(self) -> bool:
         with self._lock:
@@ -1330,6 +1351,18 @@ class Database:
                     f"{row['archetype']} {row['polarity']} intensity={row['intensity']:.2f}"
                 )
                 lines.append(f"  bias: {row['bias_json']}")
+            lines.append("")
+
+            cur.execute(
+                """
+                SELECT cycle, record_json
+                FROM cycle_records
+                ORDER BY cycle
+                """
+            )
+            lines.append("== CYCLE RECORDS ==")
+            for row in cur.fetchall():
+                lines.append(f"[C{row['cycle']}] {row['record_json']}")
             lines.append("")
 
             return "\n".join(lines)
