@@ -1,4 +1,7 @@
+import glob
+import importlib.util
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -16,6 +19,73 @@ from ui import AppUI
 DEFAULT_MASTER_SEED = ""
 DEFAULT_CIV_SEED = ""
 DEFAULT_CHAOS_SEED = ""
+SAVED_PROMPTS_LABEL = "Saved (DB)"
+
+
+def _load_prompt_sets() -> dict:
+    files = sorted(
+        set(glob.glob("prompts_design.py") + glob.glob("prompt_design*.py"))
+    )
+    prompt_sets = {}
+
+    def extract_templates(module) -> dict:
+        keys = [
+            ("EVENTS_PROMPT", "DEFAULT_EVENTS_PROMPT"),
+            ("CIV_GEN_PROMPT", "DEFAULT_CIV_GEN_PROMPT"),
+            ("CIV_THOUGHT_PROMPT", "DEFAULT_CIV_THOUGHT_PROMPT"),
+            ("MASTER_PROMPT", "DEFAULT_MASTER_PROMPT"),
+        ]
+        templates = {}
+        for primary, fallback in keys:
+            exact = getattr(module, primary, None)
+            if exact is None:
+                exact = getattr(module, fallback, None)
+            if isinstance(exact, str):
+                templates[primary] = exact
+                continue
+            candidates = [
+                name
+                for name in dir(module)
+                if name.startswith(primary) and isinstance(getattr(module, name), str)
+            ]
+            if candidates:
+                templates[primary] = getattr(module, sorted(candidates)[0])
+        if len(templates) != 4:
+            return {}
+        return templates
+
+    for path in files:
+        module_name = os.path.splitext(os.path.basename(path))[0]
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if not spec or not spec.loader:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            continue
+        templates = extract_templates(module)
+        if not templates:
+            continue
+        match = re.search(r"v(\d+)", module_name)
+        if module_name == "prompts_design":
+            label = "v1"
+        else:
+            label = f"v{match.group(1)}" if match else "default"
+        prompt_sets[label] = {
+            "events": templates["EVENTS_PROMPT"],
+            "civ_gen": templates["CIV_GEN_PROMPT"],
+            "civ_thought": templates["CIV_THOUGHT_PROMPT"],
+            "master": templates["MASTER_PROMPT"],
+        }
+    if not prompt_sets:
+        prompt_sets["default"] = {
+            "events": DEFAULT_EVENTS_PROMPT,
+            "civ_gen": DEFAULT_CIV_GEN_PROMPT,
+            "civ_thought": DEFAULT_CIV_THOUGHT_PROMPT,
+            "master": DEFAULT_MASTER_PROMPT,
+        }
+    return prompt_sets
 
 
 def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
@@ -23,6 +93,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
     chooser = tk.Tk()
     chooser.withdraw()
 
+    prompt_sets = _load_prompt_sets()
     selected = {
         "path": "",
         "ollama_on": True,
@@ -115,6 +186,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
                 db.get_setting("prompt_master_template") or DEFAULT_MASTER_PROMPT,
             )
             db.close()
+            prompt_set_combo.set(SAVED_PROMPTS_LABEL)
         except Exception:
             pass
 
@@ -191,9 +263,46 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
     model_combo.pack(side="left", padx=6)
     model_combo.bind("<<ComboboxSelected>>", on_model_change)
 
+    prompt_row = tk.Frame(llm_frame)
+    prompt_row.pack(fill="x", pady=(2, 4))
+    tk.Label(prompt_row, text="Prompt set:").pack(side="left")
+    prompt_set_keys = sorted(prompt_sets.keys())
+    prompt_set_combo = ttk.Combobox(
+        prompt_row,
+        values=[SAVED_PROMPTS_LABEL] + prompt_set_keys,
+        state="readonly",
+        width=20,
+    )
+    prompt_set_combo.pack(side="left", padx=6)
+    def _pick_latest_prompt_set(keys):
+        versions = []
+        for key in keys:
+            match = re.match(r"v(\d+)$", key)
+            if match:
+                versions.append((int(match.group(1)), key))
+        if versions:
+            return sorted(versions)[-1][1]
+        return keys[0] if keys else "default"
+
+    default_prompt_set = _pick_latest_prompt_set(prompt_set_keys)
+    prompt_set_combo.set(default_prompt_set)
+
     tk.Button(llm_frame, text="Refresh Models", command=refresh_models).pack(
         anchor="w", pady=(4, 6)
     )
+
+    prompt_header = tk.Label(
+        prompt_tab,
+        text="Prompt set: ",
+        font=("Helvetica", 10),
+    )
+    prompt_header.pack(anchor="w", padx=6, pady=(6, 2))
+    prompt_set_label = tk.Label(
+        prompt_tab,
+        text=prompt_set_combo.get(),
+        font=("Helvetica", 10, "bold"),
+    )
+    prompt_set_label.pack(anchor="w", padx=6, pady=(0, 4))
 
     template_tabs = ttk.Notebook(prompt_tab)
     template_tabs.pack(fill="both", expand=True, padx=6, pady=6)
@@ -210,10 +319,29 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, dict]:
     civ_thought_prompt = _make_template_tab("Civ Thought")
     master_prompt = _make_template_tab("Master")
 
-    events_prompt.insert(tk.END, DEFAULT_EVENTS_PROMPT)
-    civ_gen_prompt.insert(tk.END, DEFAULT_CIV_GEN_PROMPT)
-    civ_thought_prompt.insert(tk.END, DEFAULT_CIV_THOUGHT_PROMPT)
-    master_prompt.insert(tk.END, DEFAULT_MASTER_PROMPT)
+    def _apply_prompt_set(label: str) -> None:
+        if label == SAVED_PROMPTS_LABEL:
+            return
+        templates = prompt_sets.get(label)
+        if not templates:
+            return
+        for widget, key in (
+            (events_prompt, "events"),
+            (civ_gen_prompt, "civ_gen"),
+            (civ_thought_prompt, "civ_thought"),
+            (master_prompt, "master"),
+        ):
+            widget.delete("1.0", tk.END)
+            widget.insert(tk.END, templates[key])
+
+    def on_prompt_set_change(_event: tk.Event) -> None:
+        label = prompt_set_combo.get().strip()
+        prompt_set_label.configure(text=label)
+        _apply_prompt_set(label)
+
+    prompt_set_combo.bind("<<ComboboxSelected>>", on_prompt_set_change)
+    prompt_set_label.configure(text=default_prompt_set)
+    _apply_prompt_set(default_prompt_set)
 
     action_row = tk.Frame(dialog)
     action_row.pack(pady=6)
