@@ -2,6 +2,10 @@ import re
 from typing import Dict, List
 
 
+AGENDA_TOKENS = {"SURVIVE", "REFORM", "EXPLORE", "DOMINATE", "WITHDRAW"}
+STANCE_TOKENS = {"PRAGMATIC", "ZEALOUS", "CYNICAL", "COMPASSIONATE", "NIHILISTIC"}
+
+
 def parse_sections(text: str, allowed_headers: List[str]) -> Dict[str, str]:
     """Best-effort section parser for plain-text LLM outputs."""
     normalized = {h.upper(): h for h in allowed_headers}
@@ -31,3 +35,35 @@ def parse_sections(text: str, allowed_headers: List[str]) -> Dict[str, str]:
             result[header] = value
 
     return {normalized[k]: v for k, v in result.items()}
+
+
+def parse_agenda(text: str) -> str:
+    if not text:
+        return "SURVIVE"
+    match = re.search(r"(?im)^\s*AGENDA\s*:\s*([A-Z]+)\s*$", text)
+    if not match:
+        return "SURVIVE"
+    token = match.group(1).strip().upper()
+    if token in AGENDA_TOKENS:
+        return token
+    return "SURVIVE"
+
+
+def parse_stance(text: str) -> str:
+    if not text:
+        return "PRAGMATIC"
+    match = re.search(r"(?im)^\s*STANCE\s*:\s*([A-Z]+)\s*$", text)
+    if not match:
+        return "PRAGMATIC"
+    token = match.group(1).strip().upper()
+    if token in STANCE_TOKENS:
+        return token
+    return "PRAGMATIC"
+
+
+def strip_control_lines(text: str) -> str:
+    if not text:
+        return text
+    cleaned = re.sub(r"(?im)^\s*AGENDA\s*:\s*[A-Z]+\s*$\n?", "", text)
+    cleaned = re.sub(r"(?im)^\s*STANCE\s*:\s*[A-Z]+\s*$\n?", "", cleaned)
+    return cleaned.strip()

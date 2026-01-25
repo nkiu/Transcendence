@@ -6,7 +6,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from lib.db import Database, Planet, StarSystem
 from lib.llm import LLMClient
-from lib.narrative_parser import parse_sections
+from lib.narrative_parser import (
+    AGENDA_TOKENS,
+    STANCE_TOKENS,
+    parse_agenda,
+    parse_sections,
+    parse_stance,
+    strip_control_lines,
+)
 from lib.rules_engine import (
     AppliedEvent,
     CivilizationState,
@@ -162,6 +169,22 @@ class Simulation:
     def _load_civ_states(self) -> List[CivilizationState]:
         civ_states = []
         for civ in self.db.list_civilizations():
+            progress_raw = self.db.get_setting(f"civ_progress_{civ.id}")
+            try:
+                progress = float(progress_raw) if progress_raw is not None else 0.0
+            except ValueError:
+                progress = 0.0
+            progress = max(0.0, min(1.0, progress))
+            stage = civ.tech_stage or "stone"
+            agenda = (self.db.get_setting(f"civ_agenda_{civ.id}") or "SURVIVE").strip().upper()
+            if agenda not in AGENDA_TOKENS:
+                agenda = "SURVIVE"
+            stance = (self.db.get_setting(f"civ_stance_{civ.id}") or "PRAGMATIC").strip().upper()
+            if stance not in STANCE_TOKENS:
+                stance = "PRAGMATIC"
+            if self.llm.mode == "stub":
+                agenda = "SURVIVE"
+                stance = "PRAGMATIC"
             stats = CivStats(
                 eco_pressure=civ.eco_pressure,
                 inequality=civ.inequality,
@@ -170,6 +193,9 @@ class Simulation:
                 innovation=civ.innovation,
                 food_security=civ.food_security,
                 health=civ.health,
+                elite_power=civ.elite_power,
+                legitimacy=civ.legitimacy,
+                extraction_rate=civ.extraction_rate,
             )
             civ_states.append(
                 CivilizationState(
@@ -180,6 +206,10 @@ class Simulation:
                     extinct=bool(civ.extinct == 1),
                     extinct_cycle=civ.extinct_cycle,
                     stats=stats,
+                    progress=progress,
+                    stage=stage,
+                    agenda=agenda,
+                    stance=stance,
                     marks=self.db.list_marks(civ.id),
                     consecutive_extreme_eco=civ.consecutive_extreme_eco,
                     consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
@@ -212,11 +242,18 @@ class Simulation:
                 stability=civ.stats.stability,
                 food_security=civ.stats.food_security,
                 health=civ.stats.health,
+                elite_power=civ.stats.elite_power,
+                legitimacy=civ.stats.legitimacy,
+                extraction_rate=civ.stats.extraction_rate,
+                tech_stage=civ.stage,
                 consecutive_extreme_eco=civ.consecutive_extreme_eco,
                 consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
                 consecutive_famine=civ.consecutive_famine,
                 consecutive_zero_stability=civ.consecutive_zero_stability,
                 consecutive_good_cycles=civ.consecutive_good_cycles,
+            )
+            self.db.set_setting(
+                f"civ_progress_{civ.id}", f"{civ.progress:.4f}"
             )
             if not civ.alive:
                 if "Extinct" not in self.db.list_marks(int(civ.id)):
@@ -311,9 +348,13 @@ class Simulation:
             events = [e for e in civ_events if e.target == civ.id]
             context = self._build_civ_context(cycle_id, civ, events)
             if self.llm.mode == "stub":
+                self.db.set_setting(f"civ_agenda_{civ.id}", "SURVIVE")
+                self.db.set_setting(f"civ_stance_{civ.id}", "PRAGMATIC")
                 reports[civ.id] = {
                     "log_text": "LLM disabled.",
                     "god_text": "",
+                    "agenda": "SURVIVE",
+                    "stance": "PRAGMATIC",
                     "model": "",
                     "latency_ms": "0",
                 }
@@ -351,8 +392,10 @@ class Simulation:
             )
             if result:
                 sections = parse_sections(result.response, ["LOG", "GOD"])
-                log_text = sections.get("LOG", "").strip()
-                god_text = sections.get("GOD", "").strip()
+                agenda = parse_agenda(result.response)
+                stance = parse_stance(result.response)
+                log_text = strip_control_lines(sections.get("LOG", "").strip())
+                god_text = strip_control_lines(sections.get("GOD", "").strip())
                 self._log_llm_format_issue(
                     "civ",
                     int(civ.id),
@@ -360,10 +403,14 @@ class Simulation:
                     result.response,
                     required_headers=["LOG"],
                 )
+                self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
+                self.db.set_setting(f"civ_stance_{civ.id}", stance)
                 if log_text:
                     reports[civ.id] = {
                         "log_text": log_text,
                         "god_text": god_text,
+                        "agenda": agenda,
+                        "stance": stance,
                         "model": result.model,
                         "latency_ms": str(result.latency_ms),
                     }
@@ -628,6 +675,9 @@ class Simulation:
             stability = round(random.uniform(0.3, 0.8), 2)
             food_security = round(random.uniform(0.3, 0.9), 2)
             health = round(random.uniform(0.3, 0.9), 2)
+            elite_power = 0.35
+            legitimacy = 0.55
+            extraction_rate = 0.35
             tech_stage = "stone"
             civ_id = self.db.add_civilization(
                 civ.name,
@@ -644,6 +694,9 @@ class Simulation:
                 stability,
                 food_security,
                 health,
+                elite_power,
+                legitimacy,
+                extraction_rate,
                 tech_stage,
                 "",
                 0,
@@ -652,6 +705,9 @@ class Simulation:
                 0,
                 0,
             )
+            self.db.set_setting(f"civ_progress_{civ_id}", "0.0000")
+            self.db.set_setting(f"civ_agenda_{civ_id}", "SURVIVE")
+            self.db.set_setting(f"civ_stance_{civ_id}", "PRAGMATIC")
             self.db.add_ai_log(
                 "civ",
                 civ_id,
@@ -964,6 +1020,13 @@ class Simulation:
             f"food_security={civ.stats.food_security:.2f}, "
             f"health={civ.stats.health:.2f}"
         )
+        lines.append(
+            "  "
+            f"elite_power={civ.stats.elite_power:.2f}, "
+            f"legitimacy={civ.stats.legitimacy:.2f}, "
+            f"extraction_rate={civ.stats.extraction_rate:.2f}"
+        )
+        lines.append(f"Stage: {civ.stage} (progress={civ.progress:.2f})")
         lines.append("Marks: " + (", ".join(civ.marks) if civ.marks else "none"))
         recent = list(reversed(self.db.list_ai_logs("civ", int(civ.id), limit=3)))
         if recent:
@@ -1173,11 +1236,15 @@ class Simulation:
                     "extinct": civ.extinct,
                     "extinct_cycle": civ.extinct_cycle,
                     "stats": civ.stats.as_dict(),
+                    "stage": civ.stage,
+                    "progress": civ.progress,
                     "world_marks": list(civ.marks),
                     "applied_events": applied,
                     "narrative": {
                         "log_text": narrative.get("log_text", ""),
                         "god_text": narrative.get("god_text", ""),
+                        "agenda": narrative.get("agenda", ""),
+                        "stance": narrative.get("stance", ""),
                     },
                     "meta": {
                         "llm_model": narrative.get("model", ""),
@@ -1195,8 +1262,11 @@ class Simulation:
                 break
         if not event:
             return
-        applied = self.rules_engine._make_applied_event(event, str(target))
         civ_states = self._load_civ_states()
+        civ = None
+        if event.scope == "civ":
+            civ = next((c for c in civ_states if c.id == str(target)), None)
+        applied = self.rules_engine._make_applied_event(event, str(target), civ)
         universe = self._load_universe_state(cycle_id)
         if applied.scope == "global":
             self.rules_engine._apply_event(applied, civ_states, universe)

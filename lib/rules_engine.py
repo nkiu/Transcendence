@@ -13,6 +13,25 @@ STAT_KEYS = (
     "innovation",
     "food_security",
     "health",
+    "elite_power",
+    "legitimacy",
+    "extraction_rate",
+)
+
+STAGE_ORDER = {
+    "stone": 0,
+    "bronze": 1,
+    "iron": 2,
+    "industrial": 3,
+    "space": 4,
+}
+
+STAGE_THRESHOLDS = (
+    (0.90, "space"),
+    (0.70, "industrial"),
+    (0.45, "iron"),
+    (0.25, "bronze"),
+    (0.00, "stone"),
 )
 
 
@@ -25,6 +44,9 @@ class CivStats:
     innovation: float
     food_security: float
     health: float
+    elite_power: float
+    legitimacy: float
+    extraction_rate: float
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -35,6 +57,9 @@ class CivStats:
             "innovation": self.innovation,
             "food_security": self.food_security,
             "health": self.health,
+            "elite_power": self.elite_power,
+            "legitimacy": self.legitimacy,
+            "extraction_rate": self.extraction_rate,
         }
 
 
@@ -47,6 +72,10 @@ class CivilizationState:
     extinct: bool
     extinct_cycle: Optional[int]
     stats: CivStats
+    progress: float = 0.0
+    stage: str = "stone"
+    agenda: str = "SURVIVE"
+    stance: str = "PRAGMATIC"
     marks: List[str] = field(default_factory=list)
     consecutive_extreme_eco: int = 0
     consecutive_extreme_unrest: int = 0
@@ -87,6 +116,8 @@ class EventDefinition:
     preconditions: List[str]
     effects: Dict[str, object]
     notes: str
+    min_stage: Optional[str] = None
+    max_stage: Optional[str] = None
 
 
 @dataclass
@@ -193,6 +224,8 @@ class RulesEngine:
                     preconditions=item.get("preconditions", []),
                     effects=item["effects"],
                     notes=item.get("notes", ""),
+                    min_stage=item.get("min_stage"),
+                    max_stage=item.get("max_stage"),
                 )
             )
         return events
@@ -209,6 +242,8 @@ class RulesEngine:
         for event in self.events:
             if event.scope != scope:
                 continue
+            if scope == "civ" and not self._passes_stage_gate(event, civ.stage):
+                continue
             if event.severity_range[1] < severity_min or event.severity_range[0] > severity_max:
                 continue
             key = self._cooldown_key(event.id, civ.id if scope == "civ" else "global")
@@ -221,6 +256,24 @@ class RulesEngine:
                 continue
             eligible.append(event)
         return eligible
+
+    def _passes_stage_gate(self, event: EventDefinition, stage: str) -> bool:
+        if not event.min_stage and not event.max_stage:
+            return True
+        civ_idx = STAGE_ORDER.get(stage)
+        if civ_idx is None:
+            return True
+        min_stage = event.min_stage
+        if min_stage:
+            min_idx = STAGE_ORDER.get(min_stage)
+            if min_idx is not None and civ_idx < min_idx:
+                return False
+        max_stage = event.max_stage
+        if max_stage:
+            max_idx = STAGE_ORDER.get(max_stage)
+            if max_idx is not None and civ_idx > max_idx:
+                return False
+        return True
 
     def roll_cycle(
         self, civs: List[CivilizationState], universe: UniverseState
@@ -245,8 +298,13 @@ class RulesEngine:
                     self._roll_events_for_civ(civ, universe, 3, 5, major_rolls)
                 )
 
+        global_stage_bias = any(
+            civ.alive and civ.stage in ("industrial", "space") for civ in civs
+        )
         if self.ruleset.should_roll_global(universe, self.rng):
-            global_events.extend(self._roll_events_for_global(universe, 1, 5, 1))
+            global_events.extend(
+                self._roll_events_for_global(universe, 1, 5, 1, global_stage_bias)
+            )
 
         for event in civ_events:
             self._apply_event(event, civs, universe)
@@ -267,7 +325,28 @@ class RulesEngine:
                 civ_events.append(collapse_event)
                 self._apply_event(collapse_event, civs, universe)
 
+        self._apply_internal_drift(civs)
+        civ_events.extend(self._update_progress_and_stage(civs, universe))
+
         return civ_events, global_events, delayed_applied
+
+    def _apply_internal_drift(self, civs: List[CivilizationState]) -> None:
+        for civ in civs:
+            if not civ.alive:
+                continue
+            stats = civ.stats.as_dict()
+            if stats["inequality"] >= 0.60 or stats["stability"] <= 0.40:
+                stats["elite_power"] = clamp(
+                    stats["elite_power"] + 0.01 * stats["extraction_rate"]
+                )
+            if stats["cohesion"] <= 0.40:
+                stats["legitimacy"] = clamp(stats["legitimacy"] - 0.02)
+            if stats["food_security"] <= 0.35 or stats["health"] <= 0.35:
+                stats["legitimacy"] = clamp(stats["legitimacy"] - 0.015)
+            if stats["legitimacy"] <= 0.30:
+                stats["cohesion"] = clamp(stats["cohesion"] - 0.01)
+                stats["stability"] = clamp(stats["stability"] - 0.01)
+            civ.stats = CivStats(**stats)
 
     def _passes_preconditions(
         self, event: EventDefinition, civ: CivilizationState, universe: UniverseState
@@ -297,8 +376,8 @@ class RulesEngine:
             eligible = self.eligible_events(civ, universe, "civ", severity_min, severity_max)
             if not eligible:
                 break
-            event = self._weighted_pick(eligible)
-            selected.append(self._make_applied_event(event, civ.id))
+            event = self._weighted_pick(eligible, civ, universe, False)
+            selected.append(self._make_applied_event(event, civ.id, civ))
             universe.cooldowns[self._cooldown_key(event.id, civ.id)] = universe.cycle
         return selected
 
@@ -308,6 +387,7 @@ class RulesEngine:
         severity_min: int,
         severity_max: int,
         count: int,
+        global_stage_bias: bool,
     ) -> List[AppliedEvent]:
         selected: List[AppliedEvent] = []
         dummy_civ = CivilizationState(
@@ -317,7 +397,7 @@ class RulesEngine:
             alive=True,
             extinct=False,
             extinct_cycle=None,
-            stats=CivStats(0, 0, 0, 0, 0, 0, 0),
+            stats=CivStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             marks=[],
         )
         for _ in range(count):
@@ -326,20 +406,123 @@ class RulesEngine:
             )
             if not eligible:
                 break
-            event = self._weighted_pick(eligible)
-            selected.append(self._make_applied_event(event, "global"))
+            event = self._weighted_pick(eligible, None, universe, global_stage_bias)
+            selected.append(self._make_applied_event(event, "global", None))
             universe.cooldowns[self._cooldown_key(event.id, "global")] = universe.cycle
         return selected
 
-    def _weighted_pick(self, events: List[EventDefinition]) -> EventDefinition:
+    def _weighted_pick(
+        self,
+        events: List[EventDefinition],
+        civ: Optional[CivilizationState],
+        universe: Optional[UniverseState],
+        global_stage_bias: bool,
+    ) -> EventDefinition:
         weights = self.ruleset.modify_weights(
-            civ=None, universe=None, eligible_events=events
+            civ=civ, universe=universe, eligible_events=events
         )
+        adjusted = []
+        for event, base in zip(events, weights):
+            factor = self._agenda_weight_factor(event, civ)
+            factor *= self._stance_weight_factor(event, civ)
+            factor *= self._stage_weight_factor(event, civ, global_stage_bias)
+            weight = max(float(base) * factor, 0.01)
+            adjusted.append(weight)
+        weights = adjusted
         return self.rng.choices(events, weights=weights, k=1)[0]
 
-    def _make_applied_event(self, event: EventDefinition, target: str) -> AppliedEvent:
+    def _agenda_weight_factor(
+        self, event: EventDefinition, civ: Optional[CivilizationState]
+    ) -> float:
+        if civ is None:
+            return 1.0
+        agenda = (civ.agenda or "SURVIVE").strip().upper()
+        if agenda == "SURVIVE":
+            return 1.0
+        event_id = event.id.upper()
+        if agenda == "EXPLORE":
+            keywords = ("SCOUT", "EXPLORE", "OUTPOST", "NAV", "SKY")
+            if event.kind in ("technology", "cosmic") or any(k in event_id for k in keywords):
+                return 1.8
+            return 1.0
+        if agenda == "REFORM":
+            return 1.6 if event.kind == "policy" else 1.0
+        if agenda == "DOMINATE":
+            return 1.6 if event.kind in ("conflict", "politics") else 1.0
+        if agenda == "WITHDRAW":
+            factor = 1.0
+            if event.kind == "culture":
+                factor *= 1.6
+            if event.kind == "technology":
+                factor *= 0.7
+            return factor
+        return 1.0
+
+    def _stage_weight_factor(
+        self,
+        event: EventDefinition,
+        civ: Optional[CivilizationState],
+        global_stage_bias: bool,
+    ) -> float:
+        if event.scope == "global":
+            return 1.15 if global_stage_bias and event.kind == "cosmic" else 1.0
+        if civ is None:
+            return 1.0
+        if civ.stage == "stone" and event.kind == "technology":
+            if any(tag in event.id.upper() for tag in ("BREAKTHROUGH", "ACCIDENT", "METAL_WORKING")):
+                return 0.5
+        return 1.0
+
+    def _stance_weight_factor(
+        self, event: EventDefinition, civ: Optional[CivilizationState]
+    ) -> float:
+        if civ is None:
+            return 1.0
+        stance = (civ.stance or "PRAGMATIC").strip().upper()
+        event_id = event.id.upper()
+        if stance == "PRAGMATIC":
+            return 1.0
+        if stance == "ZEALOUS":
+            factor = 1.0
+            if event.kind == "culture":
+                factor *= 1.5
+            if event.kind == "politics":
+                factor *= 1.25
+            if any(tag in event_id for tag in ("TABOO", "SCHISM")):
+                factor *= 1.25
+            return factor
+        if stance == "CYNICAL":
+            factor = 1.0
+            if event.kind == "society" and any(tag in event_id for tag in ("RENT", "OLIGARCH", "BLACK_MARKET")):
+                factor *= 1.6
+            if any(tag in event_id for tag in ("COMMONS", "PUBLIC_WORKS")):
+                factor *= 0.8
+            return factor
+        if stance == "COMPASSIONATE":
+            factor = 1.0
+            if event.kind == "policy":
+                factor *= 1.6
+            if "BACKLASH" in event_id:
+                factor *= 1.3
+            return factor
+        if stance == "NIHILISTIC":
+            factor = 1.0
+            if event.kind == "culture":
+                factor *= 1.4
+            if event.kind == "conflict" and civ.stats.legitimacy <= 0.40:
+                factor *= 1.3
+            return factor
+        return 1.0
+
+    def _make_applied_event(
+        self,
+        event: EventDefinition,
+        target: str,
+        civ: Optional[CivilizationState] = None,
+    ) -> AppliedEvent:
         severity = self.rng.randint(event.severity_range[0], event.severity_range[1])
         effects = event.effects
+        delayed_effects = self._build_delayed_effects(event, target, effects, civ)
         return AppliedEvent(
             event_id=event.id,
             kind=event.kind,
@@ -349,17 +532,84 @@ class RulesEngine:
             deltas=effects.get("deltas", {}),
             add_marks=effects.get("add_marks", []),
             remove_marks=effects.get("remove_marks", []),
-            delayed_effects=[
-                DelayedEffect(
-                    cycle_delay=int(item.get("cycle_delay", 0)),
-                    target=target if event.scope == "civ" else "global",
-                    deltas=item.get("deltas", {}),
-                    add_marks=item.get("add_marks", []),
-                    remove_marks=item.get("remove_marks", []),
-                )
-                for item in effects.get("delayed_effects", [])
-            ],
+            delayed_effects=delayed_effects,
         )
+
+    def _build_delayed_effects(
+        self,
+        event: EventDefinition,
+        target: str,
+        effects: Dict[str, object],
+        civ: Optional[CivilizationState],
+    ) -> List[DelayedEffect]:
+        delayed: List[DelayedEffect] = []
+        for item in effects.get("delayed_effects", []):
+            if not isinstance(item, dict):
+                continue
+            cycle_delay = int(item.get("cycle_delay", 0))
+            payload = item
+            branch = item.get("branch")
+            if isinstance(branch, dict):
+                success = self.rng.random() < 0.5
+                choice = branch.get("success") if success else branch.get("failure")
+                if success and event.id == "EVT_FIRST_OUTPOST" and civ is not None:
+                    choice = self._outpost_success_payload(civ)
+                payload = choice if isinstance(choice, dict) else {}
+            delayed.append(
+                DelayedEffect(
+                    cycle_delay=cycle_delay,
+                    target=target if event.scope == "civ" else "global",
+                    deltas=payload.get("deltas", {}) if isinstance(payload, dict) else {},
+                    add_marks=payload.get("add_marks", []) if isinstance(payload, dict) else [],
+                    remove_marks=payload.get("remove_marks", []) if isinstance(payload, dict) else [],
+                )
+            )
+            if isinstance(payload, dict):
+                for nested in payload.get("delayed_effects", []):
+                    if not isinstance(nested, dict):
+                        continue
+                    nested_delay = int(nested.get("cycle_delay", 0))
+                    delayed.append(
+                        DelayedEffect(
+                            cycle_delay=cycle_delay + nested_delay,
+                            target=target if event.scope == "civ" else "global",
+                            deltas=nested.get("deltas", {}),
+                            add_marks=nested.get("add_marks", []),
+                            remove_marks=nested.get("remove_marks", []),
+                        )
+                    )
+        return delayed
+
+    def _outpost_success_payload(self, civ: CivilizationState) -> Dict[str, object]:
+        inequality = civ.stats.inequality
+        elite_power = civ.stats.elite_power
+        stance = (civ.stance or "").strip().upper()
+        extraction = inequality >= 0.60 or elite_power >= 0.60 or stance == "CYNICAL"
+        if extraction:
+            return {
+                "deltas": {
+                    "food_security": 0.06,
+                    "innovation": 0.05,
+                    "inequality": 0.05,
+                    "eco_pressure": 0.04,
+                },
+                "add_marks": ["FrontierExtraction"],
+                "remove_marks": [],
+                "delayed_effects": [
+                    {"cycle_delay": 2, "deltas": {"legitimacy": -0.04}, "add_marks": [], "remove_marks": []}
+                ],
+            }
+        return {
+            "deltas": {
+                "food_security": 0.06,
+                "innovation": 0.04,
+                "inequality": -0.02,
+                "cohesion": 0.02,
+                "eco_pressure": 0.03,
+            },
+            "add_marks": ["FrontierCommons"],
+            "remove_marks": [],
+        }
 
     def _apply_event(
         self, event: AppliedEvent, civs: List[CivilizationState], universe: UniverseState
@@ -432,3 +682,55 @@ class RulesEngine:
 
     def _cooldown_key(self, event_id: str, target: str) -> str:
         return f"{target}:{event_id}"
+
+    def _update_progress_and_stage(
+        self, civs: List[CivilizationState], universe: UniverseState
+    ) -> List[AppliedEvent]:
+        stage_events: List[AppliedEvent] = []
+        for civ in civs:
+            if not civ.alive:
+                continue
+            progress = civ.progress
+            stats = civ.stats
+            progress += 0.02 * stats.food_security
+            progress += 0.02 * stats.health
+            progress += 0.015 * stats.stability
+            progress += 0.02 * stats.innovation
+            progress -= 0.02 * stats.eco_pressure
+            progress -= 0.01 * stats.inequality
+            if stats.cohesion <= 0.20:
+                progress -= 0.02
+            civ.progress = clamp(progress)
+
+            upgraded = self._stage_from_progress(civ.progress, civ.stage)
+            if upgraded != civ.stage:
+                civ.stage = upgraded
+                mark = f"Stage_{upgraded}"
+                stage_event = AppliedEvent(
+                    event_id=f"STAGE_{upgraded.upper()}",
+                    kind="progress",
+                    scope="civ",
+                    severity=1,
+                    target=civ.id,
+                    deltas={},
+                    add_marks=[mark],
+                    remove_marks=[],
+                    delayed_effects=[],
+                )
+                stage_events.append(stage_event)
+                self._apply_event(stage_event, civs, universe)
+        return stage_events
+
+    def _stage_from_progress(self, progress: float, current: str) -> str:
+        current_idx = STAGE_ORDER.get(current)
+        if current_idx is None:
+            return current
+        desired = current
+        for threshold, stage in STAGE_THRESHOLDS:
+            if progress >= threshold:
+                desired = stage
+                break
+        desired_idx = STAGE_ORDER.get(desired, current_idx)
+        if desired_idx > current_idx:
+            return desired
+        return current

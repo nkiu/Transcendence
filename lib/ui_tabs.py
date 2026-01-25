@@ -6,6 +6,30 @@ from tkinter import ttk
 class UITabsMixin:
     """Tabs and text panels (master, civs, stats, world, chaos, directives)."""
 
+    def _format_percent(self, value) -> str:
+        try:
+            return f"{int(round(float(value) * 100))}%"
+        except (TypeError, ValueError):
+            return "—"
+
+    def _format_stage_progress(self, stage: str, progress_value) -> str:
+        if not stage:
+            return "Stage: — | Progress: —"
+        if progress_value is None:
+            return f"Stage: {stage} | Progress: —"
+        return f"Stage: {stage} | Progress: {self._format_percent(progress_value)}"
+
+    def _get_civ_progress(self, civ_id: int):
+        raw = self.sim.db.get_setting(f"civ_progress_{civ_id}")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_civ_token(self, civ_id: int, key: str) -> str:
+        raw = self.sim.db.get_setting(f"{key}_{civ_id}")
+        return raw.strip() if raw else ""
+
     def _refresh_civ_tabs(self) -> None:
         """Rebuild civilization log tabs (master + civs)."""
         for tab in self.civ_tabs.tabs():
@@ -25,7 +49,157 @@ class UITabsMixin:
         self._civ_tab_ids["master"] = master_frame
 
         for civ in civs:
-            frame = tk.Frame(self.civ_tabs)
+            frame = tk.Frame(self.civ_tabs, bg=self.theme["panel"])
+            header = tk.Frame(frame, bg=self.theme["panel"])
+            header.pack(fill="x", padx=8, pady=(6, 2))
+
+            title = tk.Label(
+                header,
+                text=f"{civ.name} :: {civ.tech_stage}",
+                font=("Consolas", 10, "bold"),
+                bg=self.theme["panel"],
+                fg=self.theme["accent_alt"],
+            )
+            title.pack(side="left")
+
+            intent_frame = tk.Frame(frame, bg=self.theme["panel"])
+            intent_frame.pack(fill="x", padx=8, pady=(0, 4))
+            llm_off = getattr(self.sim.llm, "mode", "") == "stub"
+            agenda = self._get_civ_token(civ.id, "civ_agenda") or "—"
+            stance = self._get_civ_token(civ.id, "civ_stance") or "—"
+            if llm_off:
+                agenda = "SURVIVE"
+                stance = "PRAGMATIC"
+                intent_text = f"Intent: {agenda} / {stance} (LLM off)"
+            else:
+                intent_text = f"Intent: {agenda} / {stance}"
+            intent_label = tk.Label(
+                intent_frame,
+                text=intent_text,
+                font=("Consolas", 9),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+            )
+            intent_label.pack(side="left")
+
+            intent_hint = tk.Label(
+                intent_frame,
+                text="LLM-declared posture; biases event weights only.",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["muted"],
+                wraplength=260,
+                justify="right",
+            )
+            intent_hint.pack(side="right")
+
+            stats_frame = tk.Frame(frame, bg=self.theme["panel"])
+            stats_frame.pack(fill="x", padx=8, pady=(0, 6))
+            stats_frame.columnconfigure(0, weight=1)
+            stats_frame.columnconfigure(1, weight=0)
+            stats_frame.columnconfigure(2, weight=1)
+            stats_frame.columnconfigure(3, weight=0)
+
+            core_label = tk.Label(
+                stats_frame,
+                text="Core Stats",
+                font=("Consolas", 9, "bold"),
+                bg=self.theme["panel"],
+                fg=self.theme["accent"],
+            )
+            core_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
+
+            stage_progress = self._format_stage_progress(
+                getattr(civ, "tech_stage", ""), self._get_civ_progress(civ.id)
+            )
+            stage_label = tk.Label(
+                stats_frame,
+                text=stage_progress,
+                font=("Consolas", 9),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+            )
+            stage_label.grid(row=0, column=2, columnspan=2, sticky="e", pady=(0, 2))
+
+            core_stats = [
+                ("Cohesion", getattr(civ, "cohesion", None)),
+                ("Inequality", getattr(civ, "inequality", None)),
+                ("Eco", getattr(civ, "eco_pressure", None)),
+                ("Innovation", getattr(civ, "innovation", None)),
+                ("Stability", getattr(civ, "stability", None)),
+                ("Food", getattr(civ, "food_security", None)),
+                ("Health", getattr(civ, "health", None)),
+            ]
+            row = 1
+            for idx, (label_text, value) in enumerate(core_stats):
+                col = idx % 2
+                if col == 0 and idx:
+                    row += 1
+                col_base = 0 if col == 0 else 2
+                label = tk.Label(
+                    stats_frame,
+                    text=f"{label_text}:",
+                    font=("Consolas", 8),
+                    bg=self.theme["panel"],
+                    fg=self.theme["muted"],
+                )
+                label.grid(row=row, column=col_base, sticky="w")
+                value_label = tk.Label(
+                    stats_frame,
+                    text=self._format_percent(value),
+                    font=("Consolas", 8),
+                    bg=self.theme["panel"],
+                    fg=self.theme["text"],
+                )
+                value_label.grid(row=row, column=col_base + 1, sticky="e", padx=(0, 8))
+
+            dynamics_label = tk.Label(
+                stats_frame,
+                text="Internal Dynamics",
+                font=("Consolas", 9, "bold"),
+                bg=self.theme["panel"],
+                fg=self.theme["accent"],
+            )
+            dynamics_label.grid(row=row + 1, column=0, columnspan=2, sticky="w", pady=(6, 2))
+            dynamics_hint = tk.Label(
+                stats_frame,
+                text="elite_power=capture capacity; legitimacy=public acceptance; extraction_rate=rent seeking",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["muted"],
+                wraplength=320,
+                justify="right",
+            )
+            dynamics_hint.grid(row=row + 1, column=2, columnspan=2, sticky="e", pady=(6, 2))
+
+            dynamics = [
+                ("Elite Power", getattr(civ, "elite_power", None)),
+                ("Legitimacy", getattr(civ, "legitimacy", None)),
+                ("Extraction", getattr(civ, "extraction_rate", None)),
+            ]
+            dynamics_row = row + 2
+            for idx, (label_text, value) in enumerate(dynamics):
+                col = idx % 2
+                if col == 0 and idx:
+                    dynamics_row += 1
+                col_base = 0 if col == 0 else 2
+                label = tk.Label(
+                    stats_frame,
+                    text=f"{label_text}:",
+                    font=("Consolas", 8),
+                    bg=self.theme["panel"],
+                    fg=self.theme["muted"],
+                )
+                label.grid(row=dynamics_row, column=col_base, sticky="w")
+                value_label = tk.Label(
+                    stats_frame,
+                    text=self._format_percent(value),
+                    font=("Consolas", 8),
+                    bg=self.theme["panel"],
+                    fg=self.theme["text"],
+                )
+                value_label.grid(row=dynamics_row, column=col_base + 1, sticky="e", padx=(0, 8))
+
             text = tk.Text(frame, wrap="word")
             self._setup_text_widget(text)
             text.pack(fill="both", expand=True)

@@ -54,6 +54,9 @@ class Civilization:
     stability: float
     food_security: float
     health: float
+    elite_power: float
+    legitimacy: float
+    extraction_rate: float
     tech_stage: str
     memory_long: str
     consecutive_extreme_eco: int
@@ -196,6 +199,9 @@ class Database:
                     stability REAL NOT NULL DEFAULT 0.5,
                     food_security REAL NOT NULL DEFAULT 0.5,
                     health REAL NOT NULL DEFAULT 0.5,
+                    elite_power REAL NOT NULL DEFAULT 0.35,
+                    legitimacy REAL NOT NULL DEFAULT 0.55,
+                    extraction_rate REAL NOT NULL DEFAULT 0.35,
                     tech_stage TEXT NOT NULL DEFAULT 'stone',
                     memory_long TEXT NOT NULL DEFAULT '',
                     consecutive_extreme_eco INTEGER NOT NULL DEFAULT 0,
@@ -317,6 +323,9 @@ class Database:
             self._ensure_column("civilizations", "stability", "REAL", "0.5")
             self._ensure_column("civilizations", "food_security", "REAL", "0.5")
             self._ensure_column("civilizations", "health", "REAL", "0.5")
+            self._ensure_column("civilizations", "elite_power", "REAL", "0.35")
+            self._ensure_column("civilizations", "legitimacy", "REAL", "0.55")
+            self._ensure_column("civilizations", "extraction_rate", "REAL", "0.35")
             self._ensure_column("civilizations", "tech_stage", "TEXT", "'stone'")
             self._ensure_column("civilizations", "memory_long", "TEXT", "''")
             self._ensure_column("civilizations", "extinct", "INTEGER", "0")
@@ -466,6 +475,9 @@ class Database:
         stability: float,
         food_security: float,
         health: float,
+        elite_power: float,
+        legitimacy: float,
+        extraction_rate: float,
         tech_stage: str,
         memory_long: str,
         consecutive_extreme_eco: int,
@@ -493,6 +505,9 @@ class Database:
                     stability,
                     food_security,
                     health,
+                    elite_power,
+                    legitimacy,
+                    extraction_rate,
                     tech_stage,
                     memory_long,
                     consecutive_extreme_eco,
@@ -501,7 +516,7 @@ class Database:
                     consecutive_zero_stability,
                     consecutive_good_cycles
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
@@ -518,6 +533,9 @@ class Database:
                     stability,
                     food_security,
                     health,
+                    elite_power,
+                    legitimacy,
+                    extraction_rate,
                     tech_stage,
                     memory_long,
                     consecutive_extreme_eco,
@@ -546,6 +564,9 @@ class Database:
         stability: Optional[float] = None,
         food_security: Optional[float] = None,
         health: Optional[float] = None,
+        elite_power: Optional[float] = None,
+        legitimacy: Optional[float] = None,
+        extraction_rate: Optional[float] = None,
         tech_stage: Optional[str] = None,
         memory_long: Optional[str] = None,
         consecutive_extreme_eco: Optional[int] = None,
@@ -595,6 +616,15 @@ class Database:
         if health is not None:
             fields.append("health = ?")
             values.append(health)
+        if elite_power is not None:
+            fields.append("elite_power = ?")
+            values.append(elite_power)
+        if legitimacy is not None:
+            fields.append("legitimacy = ?")
+            values.append(legitimacy)
+        if extraction_rate is not None:
+            fields.append("extraction_rate = ?")
+            values.append(extraction_rate)
         if tech_stage:
             fields.append("tech_stage = ?")
             values.append(tech_stage)
@@ -700,7 +730,11 @@ class Database:
                 """
                 SELECT id, name, color, home_planet_id, level, status,
                        extinct, extinct_cycle, cohesion, inequality, eco_pressure, innovation, stability,
-                       food_security, health, tech_stage, memory_long,
+                       food_security, health,
+                       COALESCE(elite_power, 0.35) AS elite_power,
+                       COALESCE(legitimacy, 0.55) AS legitimacy,
+                       COALESCE(extraction_rate, 0.35) AS extraction_rate,
+                       tech_stage, memory_long,
                        consecutive_extreme_eco, consecutive_extreme_unrest, consecutive_famine,
                        consecutive_zero_stability, consecutive_good_cycles
                 FROM civilizations
@@ -725,6 +759,9 @@ class Database:
                     float(r["stability"]),
                     float(r["food_security"]),
                     float(r["health"]),
+                    float(r["elite_power"]),
+                    float(r["legitimacy"]),
+                    float(r["extraction_rate"]),
                     r["tech_stage"],
                     r["memory_long"],
                     int(r["consecutive_extreme_eco"]),

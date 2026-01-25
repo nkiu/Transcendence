@@ -110,6 +110,74 @@
     "notes": "Corruption and unsafe goods."
   },
   {
+    "id": "EVT_RENT_SEEKING_SWELL",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 0.85,
+    "severity_range": [1,3],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["inequality >= 0.45", "stability >= 0.25"],
+    "effects": {
+      "deltas": {"inequality": 0.06, "innovation": -0.03, "stability": 0.02},
+      "add_marks": ["RentSeeking"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 2, "deltas": {"legitimacy": -0.05}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Rent extraction grows, weakening trust later."
+  },
+  {
+    "id": "EVT_PUBLIC_WORKS_COMMONS",
+    "kind": "policy",
+    "scope": "civ",
+    "weight_base": 0.75,
+    "severity_range": [1,3],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["legitimacy >= 0.45", "stability >= 0.30", "not has_mark(\"CommonsWorks\")"],
+    "effects": {
+      "deltas": {"food_security": 0.05, "cohesion": 0.03, "inequality": -0.04, "eco_pressure": 0.02},
+      "add_marks": ["CommonsWorks"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 3, "deltas": {"eco_pressure": 0.03}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Common works lift baseline welfare at a maintenance cost."
+  },
+  {
+    "id": "EVT_OLIGARCHIC_LOCKIN",
+    "kind": "politics",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [2,4],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["elite_power >= 0.60", "legitimacy <= 0.45", "stability <= 0.65"],
+    "effects": {
+      "deltas": {"stability": 0.04, "inequality": 0.08, "innovation": -0.04, "cohesion": -0.04},
+      "add_marks": ["OligarchicLock"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Elite consolidation stabilizes governance while extracting more."
+  },
+  {
+    "id": "EVT_BACKLASH_WAVE",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.75,
+    "severity_range": [2,4],
+    "cooldown_cycles": 4,
+    "cannot_repeat_for": 4,
+    "preconditions": ["has_mark(\"RentSeeking\") or has_mark(\"OligarchicLock\")", "legitimacy <= 0.40"],
+    "effects": {
+      "deltas": {"stability": -0.08, "cohesion": -0.06},
+      "add_marks": ["Backlash"],
+      "remove_marks": [],
+      "delayed_effects": [{"cycle_delay": 1, "deltas": {"inequality": 0.03}, "add_marks": [], "remove_marks": []}]
+    },
+    "notes": "Backlash erupts against extraction and lock-in."
+  },
+  {
     "id": "EVT_LAND_GRAB_ELITES",
     "kind": "society",
     "scope": "civ",
@@ -263,6 +331,76 @@
     "notes": "Taboo blocks practical reforms and locks trajectory."
   },
   {
+    "id": "EVT_SKYWATCHERS",
+    "kind": "culture",
+    "scope": "civ",
+    "min_stage": "stone",
+    "weight_base": 0.65,
+    "severity_range": [1,3],
+    "cooldown_cycles": 6,
+    "cannot_repeat_for": 6,
+    "preconditions": ["innovation >= 0.25", "stability >= 0.30", "not has_mark(\"Skywatchers\")"],
+    "effects": {
+      "deltas": {"innovation": 0.05, "cohesion": 0.02},
+      "add_marks": ["Skywatchers"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Early skywatching traditions lift innovation."
+  },
+  {
+    "id": "EVT_SCOUTING_CORPS",
+    "kind": "technology",
+    "scope": "civ",
+    "min_stage": "bronze",
+    "weight_base": 0.55,
+    "severity_range": [2,4],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["has_mark(\"Skywatchers\")", "stability >= 0.35"],
+    "effects": {
+      "deltas": {"stability": -0.03, "innovation": 0.04, "eco_pressure": 0.02},
+      "add_marks": ["SurveyCorps"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {
+          "cycle_delay": 2,
+          "branch": {
+            "success": {"deltas": {"innovation": 0.05}, "add_marks": ["StarCharts"], "remove_marks": []},
+            "failure": {"deltas": {"health": -0.04, "cohesion": -0.03}, "add_marks": ["LostExpedition"], "remove_marks": []}
+          }
+        }
+      ]
+    },
+    "notes": "Organized scouting yields either crucial maps or tragic losses."
+  },
+  {
+    "id": "EVT_FIRST_OUTPOST",
+    "kind": "technology",
+    "scope": "civ",
+    "min_stage": "iron",
+    "weight_base": 0.45,
+    "severity_range": [2,4],
+    "cooldown_cycles": 10,
+    "cannot_repeat_for": 10,
+    "preconditions": ["has_mark(\"SurveyCorps\")", "innovation >= 0.45", "stability >= 0.30", "not has_mark(\"Outpost\")"],
+    "effects": {
+      "deltas": {"stability": -0.05, "food_security": -0.03},
+      "add_marks": ["Outpost"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {
+          "cycle_delay": 3,
+          "branch": {
+            "success": {"deltas": {}, "add_marks": [], "remove_marks": []},
+            "failure": {"deltas": {"stability": -0.06, "health": -0.05}, "add_marks": ["FrontierDisaster"], "remove_marks": []}
+          }
+        }
+      ]
+    },
+    "notes": "First offworld foothold can launch a boom or a crisis."
+  },
+  {
     "id": "EVT_RITUAL_RESOURCE_WASTE",
     "kind": "culture",
     "scope": "civ",
@@ -283,6 +421,7 @@
     "id": "EVT_IRRIGATION_PUSH",
     "kind": "technology",
     "scope": "civ",
+    "min_stage": "stone",
     "weight_base": 0.7,
     "severity_range": [2,4],
     "cooldown_cycles": 5,
@@ -317,6 +456,7 @@
     "id": "EVT_METAL_WORKING",
     "kind": "technology",
     "scope": "civ",
+    "min_stage": "bronze",
     "weight_base": 0.55,
     "severity_range": [2,4],
     "cooldown_cycles": 10,
@@ -504,6 +644,7 @@
     "id": "EVT_TECH_BREAKTHROUGH_RISKY",
     "kind": "technology",
     "scope": "civ",
+    "min_stage": "industrial",
     "weight_base": 0.35,
     "severity_range": [2,4],
     "cooldown_cycles": 12,
@@ -521,6 +662,7 @@
     "id": "EVT_TECH_ACCIDENT",
     "kind": "technology",
     "scope": "civ",
+    "min_stage": "industrial",
     "weight_base": 0.45,
     "severity_range": [2,5],
     "cooldown_cycles": 8,
