@@ -125,6 +125,7 @@ class Simulation:
             master_report,
             delayed_applied,
         )
+        self._maybe_log_stat_summary(cycle_id, civ_states)
         self._maybe_log_fingerprint(cycle_id, civ_states, universe_state)
         self.db.set_setting("last_cycle", str(cycle_id))
         return cycle_id
@@ -1809,6 +1810,32 @@ class Simulation:
         payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
         self.db.add_ai_log("debug", None, cycle_id, "fingerprint", digest)
+
+    def _maybe_log_stat_summary(
+        self, cycle_id: int, civ_states: List[CivilizationState]
+    ) -> None:
+        debug_flag = (
+            os.environ.get("SIM_STAT_SUMMARY", "0") == "1"
+            or self.db.get_setting("debug_stat_summary") == "1"
+        )
+        if not debug_flag:
+            return
+        legit = [c.stats.legitimacy for c in civ_states if c.alive]
+        innov = [c.stats.innovation for c in civ_states if c.alive]
+        if not legit or not innov:
+            return
+        def _summary(values: List[float]) -> str:
+            return (
+                f"min={min(values):.2f} mean={sum(values)/len(values):.2f} "
+                f"max={max(values):.2f}"
+            )
+        self.db.add_ai_log(
+            "debug",
+            None,
+            cycle_id,
+            "stats",
+            f"legitimacy { _summary(legit)} | innovation { _summary(innov)}",
+        )
 
     def _force_event(self, cycle_id: int, event_id: str, target: str) -> None:
         event = None

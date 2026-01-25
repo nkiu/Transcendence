@@ -564,13 +564,19 @@ class RulesEngine:
             event_id = f"MISSION_{mission_type.upper()}_FAILED"
             add_marks = ["LostProbe"] if mission_type == "probe" else ["FrontierDisaster"]
             status = "failed"
+        deltas = {}
+        if success:
+            if mission_type == "probe":
+                deltas = {"legitimacy": 0.03, "cohesion": 0.01}
+            elif mission_type == "colony":
+                deltas = {"legitimacy": 0.04, "stability": -0.01}
         return AppliedEvent(
             event_id=event_id,
             kind="cosmic",
             scope="civ",
             severity=2,
             target=civ.id,
-            deltas={},
+            deltas=deltas,
             add_marks=add_marks,
             remove_marks=[],
             delayed_effects=[],
@@ -603,6 +609,28 @@ class RulesEngine:
                 stats["innovation"] = clamp(
                     stats["innovation"] - (0.01 if severe else 0.005)
                 )
+            recovery = 0.0
+            if (
+                stats["food_security"] >= 0.65
+                and stats["health"] >= 0.60
+                and stats["stability"] >= 0.45
+            ):
+                recovery += 0.01
+                if stats["inequality"] <= 0.45:
+                    recovery += 0.005
+            if crisis and recovery:
+                recovery *= 0.5
+            if recovery:
+                stats["legitimacy"] = clamp(stats["legitimacy"] + recovery)
+            if (
+                stats["stability"] >= 0.55
+                and stats["food_security"] >= 0.60
+                and stats["health"] >= 0.55
+            ):
+                stats["innovation"] = clamp(stats["innovation"] + 0.005)
+            if civ.stage in ("industrial", "space") and stats["stability"] >= 0.50:
+                stats["innovation"] = clamp(stats["innovation"] + 0.005)
+                stats["eco_pressure"] = clamp(stats["eco_pressure"] + 0.003)
             civ.stats = CivStats(**stats)
 
     def _passes_preconditions(
@@ -884,11 +912,21 @@ class RulesEngine:
             if positive:
                 return {
                     **effects,
-                    "deltas": {"innovation": 0.03, "cohesion": 0.02, "stability": 0.02},
+                    "deltas": {
+                        "innovation": 0.04,
+                        "cohesion": 0.02,
+                        "stability": 0.02,
+                        "legitimacy": 0.02,
+                    },
                 }
             return {
                 **effects,
-                "deltas": {"innovation": 0.03, "cohesion": -0.02, "stability": -0.02},
+                "deltas": {
+                    "innovation": 0.03,
+                    "cohesion": -0.01,
+                    "stability": -0.02,
+                    "legitimacy": -0.02,
+                },
             }
         return effects
 
