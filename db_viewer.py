@@ -38,6 +38,8 @@ class DBViewer(tk.Tk):
         tk.Button(top, text="Open DB", command=self._open_dialog).pack(side="left")
         self.db_label = tk.Label(top, text="No database loaded")
         self.db_label.pack(side="left", padx=8)
+        self.version_label = tk.Label(top, text="Engine: —")
+        self.version_label.pack(side="left", padx=8)
 
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=6)
@@ -156,6 +158,7 @@ class DBViewer(tk.Tk):
             self.conn.row_factory = sqlite3.Row
             self.db_path = path
             self.db_label.configure(text=path)
+            self._load_engine_version()
             self.mission_cycle_cache.clear()
             self._introspect_schema()
             self._populate_civs()
@@ -164,6 +167,21 @@ class DBViewer(tk.Tk):
         except Exception as exc:
             messagebox.showerror("DB Error", str(exc))
             self.status_var.set("Failed to load DB")
+
+    def _load_engine_version(self) -> None:
+        if not self.conn:
+            self.version_label.configure(text="Engine: —")
+            return
+        try:
+            cur = self.conn.cursor()
+            row = cur.execute(
+                "SELECT value FROM run_settings WHERE key = ?",
+                ("engine_version",),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        version = row["value"] if row else "unknown"
+        self.version_label.configure(text=f"Engine: {version}")
 
     def _introspect_schema(self) -> None:
         if not self.conn:
@@ -190,6 +208,7 @@ class DBViewer(tk.Tk):
             ["cycle_records"], ["cycle", "record_json"]
         )
         mapping["cycles"] = self._find_table(["cycles"], ["id", "summary"])
+        mapping["run_settings"] = self._find_table(["run_settings"], ["key", "value"])
         self.mapping = mapping
 
         if not mapping.get("civilizations"):
