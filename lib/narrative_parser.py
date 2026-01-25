@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Dict, List
 
@@ -39,25 +40,31 @@ def parse_sections(text: str, allowed_headers: List[str]) -> Dict[str, str]:
 
 def parse_agenda(text: str) -> str:
     if not text:
+        logging.warning("AGENDA defaulted to SURVIVE (empty narration).")
         return "SURVIVE"
     match = re.search(r"(?im)^\s*AGENDA\s*:\s*([A-Z]+)\s*$", text)
     if not match:
+        logging.warning("AGENDA defaulted to SURVIVE (missing token).")
         return "SURVIVE"
     token = match.group(1).strip().upper()
     if token in AGENDA_TOKENS:
         return token
+    logging.warning("AGENDA defaulted to SURVIVE (invalid token: %s).", token)
     return "SURVIVE"
 
 
 def parse_stance(text: str) -> str:
     if not text:
+        logging.warning("STANCE defaulted to PRAGMATIC (empty narration).")
         return "PRAGMATIC"
     match = re.search(r"(?im)^\s*STANCE\s*:\s*([A-Z]+)\s*$", text)
     if not match:
+        logging.warning("STANCE defaulted to PRAGMATIC (missing token).")
         return "PRAGMATIC"
     token = match.group(1).strip().upper()
     if token in STANCE_TOKENS:
         return token
+    logging.warning("STANCE defaulted to PRAGMATIC (invalid token: %s).", token)
     return "PRAGMATIC"
 
 

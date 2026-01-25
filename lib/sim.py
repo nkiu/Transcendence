@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import json
 import os
 import random
@@ -35,8 +36,14 @@ class Simulation:
     """Orchestrates cycle progression, persistence, and LLM-driven narration."""
     def __init__(self, db: Database) -> None:
         self.db = db
-        mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
+        llm_setting = self.db.get_setting("llm_enabled")
+        if llm_setting == "0":
+            mode = "stub"
+        else:
+            mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
         self.llm = LLMClient(mode=mode)
+        if llm_setting is None:
+            self.db.set_setting("llm_enabled", "1" if mode == "ollama" else "0")
         self.prompt_seeds = self._load_prompt_seeds()
         self.prompt_templates = self._load_prompt_templates()
         self.seed = self._init_seed()
@@ -116,6 +123,7 @@ class Simulation:
             master_report,
             delayed_applied,
         )
+        self._maybe_log_fingerprint(cycle_id, civ_states, universe_state)
         self.db.set_setting("last_cycle", str(cycle_id))
         return cycle_id
 
@@ -368,6 +376,13 @@ class Simulation:
                     self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
                 if god_text:
                     self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
+                self.db.add_ai_log(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    "intent",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}",
+                )
                 continue
             if civ.extinct or not civ.alive:
                 raise RuntimeError(
@@ -415,18 +430,25 @@ class Simulation:
                 )
                 self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
                 self.db.set_setting(f"civ_stance_{civ.id}", stance)
+                reports[civ.id] = {
+                    "log_text": log_text,
+                    "god_text": god_text,
+                    "agenda": agenda,
+                    "stance": stance,
+                    "model": result.model,
+                    "latency_ms": str(result.latency_ms),
+                }
                 if log_text:
-                    reports[civ.id] = {
-                        "log_text": log_text,
-                        "god_text": god_text,
-                        "agenda": agenda,
-                        "stance": stance,
-                        "model": result.model,
-                        "latency_ms": str(result.latency_ms),
-                    }
                     self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
-                    if god_text:
-                        self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
+                if god_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
+                self.db.add_ai_log(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    "intent",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}",
+                )
                 self.db.add_ai_log("civ", int(civ.id), cycle_id, "prompt", result.prompt)
             if stream_callback:
                 stream_callback(
@@ -1416,6 +1438,49 @@ class Simulation:
                 }
             )
         self.db.add_cycle_record(cycle_id, record)
+
+    def _maybe_log_fingerprint(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        universe_state: UniverseState,
+    ) -> None:
+        debug_flag = (
+            os.environ.get("SIM_FINGERPRINT", "0") == "1"
+            or self.db.get_setting("debug_fingerprint") == "1"
+        )
+        if not debug_flag:
+            return
+        snapshot = {
+            "cycle": cycle_id,
+            "global_marks": sorted(universe_state.global_marks),
+            "cooldowns": dict(sorted(universe_state.cooldowns.items())),
+            "pending": [
+                {
+                    "target": effect.target,
+                    "cycle_delay": effect.cycle_delay,
+                    "deltas": effect.deltas,
+                    "add_marks": effect.add_marks,
+                    "remove_marks": effect.remove_marks,
+                }
+                for effect in universe_state.global_pending_effects
+            ],
+            "civilizations": [
+                {
+                    "id": civ.id,
+                    "alive": civ.alive,
+                    "extinct": civ.extinct,
+                    "stage": civ.stage,
+                    "progress": civ.progress,
+                    "stats": civ.stats.as_dict(),
+                    "marks": sorted(civ.marks),
+                }
+                for civ in civ_states
+            ],
+        }
+        payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        self.db.add_ai_log("debug", None, cycle_id, "fingerprint", digest)
 
     def _force_event(self, cycle_id: int, event_id: str, target: str) -> None:
         event = None

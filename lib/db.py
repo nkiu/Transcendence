@@ -1238,10 +1238,26 @@ class Database:
             lines = []
             lines.append("TRANSCENDENCE SNAPSHOT")
             ruleset = self.get_setting("ruleset_name") or "harsh_realism"
+            llm_enabled = self.get_setting("llm_enabled")
             model = self.get_setting("llm_model") or ""
+            llm_active = None
+            if llm_enabled == "1":
+                llm_active = True
+            elif llm_enabled == "0":
+                llm_active = False
+            elif model:
+                llm_active = True
+            else:
+                llm_active = False
             lines.append(f"Ruleset: {ruleset}")
-            if model:
-                lines.append(f"LLM Model: {model}")
+            if llm_active:
+                lines.append("Run mode: Narrated simulation (LLM)")
+                lines.append(f"LLM enabled: true")
+                lines.append(f"LLM model: {model or '—'}")
+            else:
+                lines.append("Run mode: Pure simulation (No LLM)")
+                lines.append("LLM enabled: false")
+                lines.append("LLM model: —")
             lines.append("")
 
             cur.execute("SELECT id, started_at, ended_at, summary FROM cycles ORDER BY id")
@@ -1281,26 +1297,41 @@ class Database:
                 """
                 SELECT id, name, color, home_planet_id, level, status, extinct, extinct_cycle,
                        cohesion, inequality, eco_pressure, innovation, stability,
-                       food_security, health, tech_stage
+                       food_security, health,
+                       COALESCE(elite_power, 0.35) AS elite_power,
+                       COALESCE(legitimacy, 0.55) AS legitimacy,
+                       COALESCE(extraction_rate, 0.35) AS extraction_rate,
+                       tech_stage
                 FROM civilizations
                 ORDER BY id
                 """
             )
             lines.append("== CIVILIZATIONS ==")
             for row in cur.fetchall():
+                progress = self.get_setting(f"civ_progress_{row['id']}")
+                agenda = self.get_setting(f"civ_agenda_{row['id']}") or "—"
+                stance = self.get_setting(f"civ_stance_{row['id']}") or "—"
+                progress_value = "—"
+                try:
+                    if progress is not None:
+                        progress_value = f"{float(progress):.2f}"
+                except ValueError:
+                    progress_value = "—"
                 lines.append(
                     f"[CIV{row['id']}] {row['name']} | color={row['color']} | "
                     f"home=P{row['home_planet_id']} | level={row['level']} | status={row['status']} | "
                     f"extinct={row['extinct']} | extinct_cycle={row['extinct_cycle']} | "
-                    f"stage={row['tech_stage']}"
+                    f"stage={row['tech_stage']} | progress={progress_value}"
                 )
                 lines.append(
                     "  stats: "
                     f"coh={row['cohesion']:.2f}, ineq={row['inequality']:.2f}, "
                     f"eco={row['eco_pressure']:.2f}, inn={row['innovation']:.2f}, "
                     f"stab={row['stability']:.2f}, food={row['food_security']:.2f}, "
-                    f"health={row['health']:.2f}"
+                    f"health={row['health']:.2f}, elite={row['elite_power']:.2f}, "
+                    f"legit={row['legitimacy']:.2f}, extract={row['extraction_rate']:.2f}"
                 )
+                lines.append(f"  last_agenda={agenda} | last_stance={stance}")
             lines.append("")
 
             cur.execute(
@@ -1311,6 +1342,7 @@ class Database:
                 """
             )
             lines.append("== EVENTS ==")
+            civ_ids = {row["id"] for row in self._conn.execute("SELECT id FROM civilizations")}
             for row in cur.fetchall():
                 meta = row["metadata_json"]
                 lines.append(
@@ -1318,6 +1350,22 @@ class Database:
                 )
                 lines.append(f"  {row['detail']}")
                 lines.append(f"  metadata: {meta}")
+                try:
+                    parsed = json.loads(meta)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    scope = parsed.get("scope")
+                    target = parsed.get("target")
+                    if scope == "civ":
+                        try:
+                            target_id = int(target)
+                        except (TypeError, ValueError):
+                            target_id = None
+                        if target_id not in civ_ids:
+                            lines.append(f"  WARNING: invalid event target {target} for civ scope")
+                    elif scope == "global" and target not in ("global", None):
+                        lines.append(f"  WARNING: unexpected global target {target}")
             lines.append("")
 
             cur.execute(
@@ -1387,7 +1435,11 @@ class Database:
             cur.execute("SELECT key, value FROM run_settings ORDER BY key")
             lines.append("== RUN SETTINGS ==")
             for row in cur.fetchall():
-                lines.append(f"{row['key']} = {row['value']}")
+                key = row["key"]
+                value = row["value"]
+                if not llm_active and key == "llm_model":
+                    value = "—"
+                lines.append(f"{key} = {value}")
             lines.append("")
 
             cur.execute(

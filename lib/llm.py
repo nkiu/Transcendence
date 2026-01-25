@@ -72,6 +72,8 @@ class LLMClient:
         count: int,
         template: Optional[str] = None,
     ) -> Tuple[List[CivSeed], Optional[LLMResult]]:
+        if self.mode != "ollama":
+            return self._fallback_civs(count), None
         planets_list = "\n".join([f"- {name} ({hab:.2f})" for name, hab in planets])
         prompt = self._render_template(
             template,
@@ -104,6 +106,8 @@ class LLMClient:
         prompt_seed: str = "",
         template: Optional[str] = None,
     ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
         prompt = self._render_template(
             template,
             civ_name=civ_name,
@@ -129,6 +133,8 @@ class LLMClient:
         prompt_seed: str = "",
         template: Optional[str] = None,
     ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
         prompt = self._render_template(
             template,
             cycle=cycle,
@@ -185,8 +191,8 @@ class LLMClient:
     def _call_ollama_stream(
         self, prompt: str, on_chunk: Optional[Callable[[str], None]]
     ) -> Tuple[str, int]:
-        if self.mode == "stub":
-            return "", 0
+        if self.mode != "ollama":
+            raise RuntimeError("LLM call blocked: LLM disabled")
         start = time.monotonic()
         max_duration = int(os.environ.get("OLLAMA_CALL_TIMEOUT", "240"))
         data = json.dumps(
