@@ -281,6 +281,9 @@ class AppUI(UITabsMixin, tk.Frame):
         self.cycle_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.cycle_tab, text="Cycles")
 
+        self.missions_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.missions_tab, text="Missions")
+
         self.errors_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.errors_tab, text="Errors")
 

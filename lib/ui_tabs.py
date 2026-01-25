@@ -433,6 +433,43 @@ class UITabsMixin:
 
         text.insert(tk.END, "\n".join(lines))
 
+    def _render_missions_tab(self, parent: tk.Frame, civs) -> None:
+        for child in parent.winfo_children():
+            child.destroy()
+        parent.configure(bg=self.theme["panel"])
+        text = tk.Text(parent, wrap="word")
+        self._setup_text_widget(text)
+        text.pack(fill="both", expand=True)
+
+        lines = []
+        lines.append("== MISSIONS ==")
+        total = 0
+        for civ in civs:
+            raw = self.sim.db.get_setting(f"civ_missions_{civ.id}")
+            missions = []
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    if isinstance(data, list):
+                        missions = data
+                except json.JSONDecodeError:
+                    missions = []
+            if not missions:
+                continue
+            lines.append(f"{civ.name}:")
+            for mission in missions:
+                if not isinstance(mission, dict):
+                    continue
+                total += 1
+                lines.append(
+                    f"- {mission.get('type')} {mission.get('status')} "
+                    f"{mission.get('from_system')} -> {mission.get('to_system')} "
+                    f"(eta={mission.get('eta')})"
+                )
+        if total == 0:
+            lines.append("(none)")
+        text.insert(tk.END, "\n".join(lines))
+
     def _render_chaos_tab(self, parent: tk.Frame) -> None:
         for child in parent.winfo_children():
             child.destroy()
@@ -513,6 +550,8 @@ class UITabsMixin:
         self._render_stats_tab(self.stats_tab, civs)
         self._render_world_tab(self.world_tab)
         self._render_chaos_tab(self.chaos_tab)
+        if hasattr(self, "missions_tab"):
+            self._render_missions_tab(self.missions_tab, civs)
         if hasattr(self, "errors_tab"):
             self._render_errors_tab(self.errors_tab)
 
