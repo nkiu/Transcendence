@@ -1,2 +1,3 @@
 # This project uses only the Python standard library.
 # Ollama is run as a separate local service (not a Python package).
+Mathplotlib # Required only for the db_viewer tool to visualize data for each civilization in a graph.
