@@ -181,6 +181,18 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
     def toggle_ollama() -> None:
         selected["ollama_on"] = bool(ollama_var.get())
 
+    def toggle_no_llm() -> None:
+        no_llm = bool(no_llm_var.get())
+        if no_llm:
+            ollama_var.set(False)
+            selected["ollama_on"] = False
+            ollama_toggle.configure(state="disabled")
+            model_combo.configure(state="disabled")
+        else:
+            ollama_toggle.configure(state="normal")
+            model_combo.configure(state="normal")
+            selected["ollama_on"] = bool(ollama_var.get())
+
     def _load_prompts_from_db(path: str) -> None:
         try:
             db = Database(path)
@@ -281,6 +293,11 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
         llm_frame, text="Enable Ollama", variable=ollama_var, command=toggle_ollama
     )
     ollama_toggle.pack(anchor="w", pady=(6, 4))
+    no_llm_var = tk.BooleanVar(value=False)
+    no_llm_toggle = tk.Checkbutton(
+        llm_frame, text="No LLM (deterministic)", variable=no_llm_var, command=toggle_no_llm
+    )
+    no_llm_toggle.pack(anchor="w", pady=(0, 6))
 
     model_row = tk.Frame(llm_frame)
     model_row.pack(fill="x", pady=(2, 4))
@@ -543,6 +560,7 @@ def main() -> None:
             db.set_setting("prompt_civ", prompt_civ)
             db.set_setting("prompt_chaos", prompt_chaos)
             db.set_setting("ruleset_name", ruleset_name or "harsh_realism")
+            db.set_setting("llm_enabled", "1" if ollama_on else "0")
             db.set_setting("prompt_events", templates["events"])
             db.set_setting("prompt_civ_gen", templates["civ_gen"])
             db.set_setting("prompt_civ_thought", templates["civ_thought"])

@@ -348,16 +348,26 @@ class Simulation:
             events = [e for e in civ_events if e.target == civ.id]
             context = self._build_civ_context(cycle_id, civ, events)
             if self.llm.mode == "stub":
-                self.db.set_setting(f"civ_agenda_{civ.id}", "SURVIVE")
-                self.db.set_setting(f"civ_stance_{civ.id}", "PRAGMATIC")
+                fallback = self._generate_fallback_civ_text(civ, events, cycle_id)
+                sections = parse_sections(fallback, ["LOG", "GOD"])
+                agenda = parse_agenda(fallback)
+                stance = parse_stance(fallback)
+                log_text = strip_control_lines(sections.get("LOG", "").strip())
+                god_text = strip_control_lines(sections.get("GOD", "").strip())
+                self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
+                self.db.set_setting(f"civ_stance_{civ.id}", stance)
                 reports[civ.id] = {
-                    "log_text": "LLM disabled.",
-                    "god_text": "",
-                    "agenda": "SURVIVE",
-                    "stance": "PRAGMATIC",
+                    "log_text": log_text,
+                    "god_text": god_text,
+                    "agenda": agenda,
+                    "stance": stance,
                     "model": "",
                     "latency_ms": "0",
                 }
+                if log_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
+                if god_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
                 continue
             if civ.extinct or not civ.alive:
                 raise RuntimeError(
@@ -435,6 +445,158 @@ class Simulation:
                     f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
                 )
         return reports
+
+    def _infer_agenda_proxy(self, civ: CivilizationState) -> str:
+        stats = civ.stats
+        if stats.food_security <= 0.35 or stats.health <= 0.35:
+            return "SURVIVE"
+        if stats.stability <= 0.30 or stats.cohesion <= 0.30:
+            return "WITHDRAW"
+        if civ.progress >= 0.60 and stats.stability >= 0.40 and stats.innovation >= 0.40:
+            return "EXPLORE"
+        if (
+            stats.inequality >= 0.65
+            and stats.elite_power >= 0.55
+            and stats.legitimacy <= 0.45
+        ):
+            return "DOMINATE"
+        if (
+            stats.inequality >= 0.60
+            and stats.legitimacy >= 0.45
+            and stats.innovation >= 0.45
+        ):
+            return "REFORM"
+        return "SURVIVE"
+
+    def _infer_stance_proxy(self, civ: CivilizationState) -> str:
+        marks = set(civ.marks)
+        if marks.intersection({"SacredTaboo", "CelestialCult", "CultOfSalvation"}):
+            return "ZEALOUS"
+        if (
+            civ.stats.elite_power >= 0.65
+            or marks.intersection({"RentSeeking", "OligarchicLock", "BlackMarketNetworks"})
+        ):
+            return "CYNICAL"
+        if civ.stats.legitimacy >= 0.60 and civ.stats.inequality <= 0.45:
+            return "COMPASSIONATE"
+        if civ.stats.cohesion <= 0.25 or civ.stats.stability <= 0.25:
+            return "NIHILISTIC"
+        return "PRAGMATIC"
+
+    def _fallback_rng(self, cycle_id: int, civ_id: str) -> random.Random:
+        try:
+            civ_seed = int(civ_id)
+        except ValueError:
+            civ_seed = sum(ord(ch) for ch in civ_id)
+        seed = self.seed * 1000003 + cycle_id * 97 + civ_seed * 31
+        return random.Random(seed)
+
+    def _qualitative(self, value: float, low: float, high: float, low_text: str, high_text: str, mid_text: str) -> str:
+        if value <= low:
+            return low_text
+        if value >= high:
+            return high_text
+        return mid_text
+
+    def _generate_fallback_civ_text(
+        self, civ: CivilizationState, events: List[AppliedEvent], cycle_id: int
+    ) -> str:
+        rng = self._fallback_rng(cycle_id, civ.id)
+        agenda = self._infer_agenda_proxy(civ)
+        stance = self._infer_stance_proxy(civ)
+
+        sentences: List[str] = []
+        if events:
+            titles = [self._format_event_title(e) for e in events]
+            if len(titles) == 1:
+                sentences.append(f"This cycle brings {titles[0].lower()}.")
+            else:
+                pair = ", ".join(t.lower() for t in titles[:2])
+                sentences.append(f"This cycle brings {pair}.")
+        stats = civ.stats
+        sentences.append(
+            self._qualitative(
+                stats.food_security,
+                0.35,
+                0.70,
+                "Food is scarce and rations tighten.",
+                "Stores are steady and meals remain full.",
+                "Meals hold, but nothing feels secure.",
+            )
+        )
+        sentences.append(
+            self._qualitative(
+                stats.health,
+                0.35,
+                0.70,
+                "Illness lingers and bodies weaken.",
+                "Health feels steady and resilience shows.",
+                "Aches and recovery trade places.",
+            )
+        )
+        sentences.append(
+            self._qualitative(
+                stats.stability,
+                0.35,
+                0.70,
+                "Order feels brittle and easily shaken.",
+                "Order holds with a quiet confidence.",
+                "Order wavers but does not break.",
+            )
+        )
+        sentences.append(
+            self._qualitative(
+                stats.cohesion,
+                0.35,
+                0.70,
+                "We feel pulled apart in daily life.",
+                "We move in step more often than not.",
+                "We drift between unity and friction.",
+            )
+        )
+        if stats.innovation >= 0.70:
+            sentences.append("New ideas spread quickly, and tools change hands.")
+        elif stats.innovation <= 0.30:
+            sentences.append("Curiosity slows and experiments fall quiet.")
+        if stats.eco_pressure >= 0.70:
+            sentences.append("The land feels strained, and harvests cost more.")
+
+        marks = [m for m in civ.marks if m != "Extinct"]
+        if marks:
+            rng.shuffle(marks)
+            chosen = marks[:2]
+            if chosen:
+                sentences.append(
+                    f"We still speak of {', '.join(chosen)} as omens and memories."
+                )
+
+        rng.shuffle(sentences)
+        if len(sentences) < 3:
+            sentences.append("We endure, watching the horizon for change.")
+        if len(sentences) < 3:
+            sentences.append("The people carry on, wary but alive.")
+        if len(sentences) > 6:
+            sentences = sentences[:6]
+
+        log_text = " ".join(sentences[: max(3, min(6, len(sentences)))])
+        god_parts = [
+            f"Observer note: {civ.name} holds at stage {civ.stage} with progress {int(civ.progress * 100)}%.",
+            f"Key pressures: stability {int(stats.stability * 100)}%, cohesion {int(stats.cohesion * 100)}%, inequality {int(stats.inequality * 100)}%.",
+        ]
+        if events:
+            god_parts.append(
+                "Applied events: " + ", ".join(self._format_event_title(e) for e in events[:2]) + "."
+            )
+        god_text = " ".join(god_parts)
+
+        return (
+            "LOG:\n"
+            f"{log_text}\n"
+            "GOD:\n"
+            f"{god_text}\n"
+            f"AGENDA: {agenda}\n"
+            f"STANCE: {stance}\n"
+        )
 
     def _run_master_scribe(
         self,
@@ -1201,6 +1363,7 @@ class Simulation:
         record = {
             "cycle": cycle_id,
             "rng_seed": universe_state.rng_seed,
+            "llm_enabled": self.llm.mode != "stub",
             "global": {
                 "global_marks": list(universe_state.global_marks),
                 "global_events_applied": [self._event_to_dict(e) for e in global_events],
