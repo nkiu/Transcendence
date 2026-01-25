@@ -30,6 +30,18 @@ class NarrativeParserTests(unittest.TestCase):
         self.assertEqual(sections["LOG"], "We survive.")
         self.assertEqual(sections["GOD"], "")
 
+    def test_shuffled_sections(self) -> None:
+        text = "GOD:\nThe omens fade.\nLOG:\nWe march."
+        sections = parse_sections(text, ["LOG", "GOD"])
+        self.assertEqual(sections["LOG"], "We march.")
+        self.assertEqual(sections["GOD"], "The omens fade.")
+
+    def test_extra_text_before_after(self) -> None:
+        text = "Prelude line.\nLOG:\nWe march.\nGOD:\nThe omens fade.\nPostlude."
+        sections = parse_sections(text, ["LOG", "GOD"])
+        self.assertEqual(sections["LOG"], "We march.")
+        self.assertEqual(sections["GOD"], "The omens fade.")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -534,7 +534,7 @@ def main() -> None:
     if not db_path:
         return
     root = tk.Tk()
-    root.title("Transcendence - Universe Sim")
+    root.title("Transcendence - Universe Sim - V6_BackHole")
     root.geometry("1000x650")
     loading = tk.Frame(root)
     loading.pack(fill="both", expand=True)

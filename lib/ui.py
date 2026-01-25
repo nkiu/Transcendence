@@ -71,7 +71,7 @@ class AppUI(UITabsMixin, tk.Frame):
 
         title = tk.Label(
             header,
-            text="TRANSCENDENCE :: UNIVERSE CONTROL",
+            text="TRANSCENDENCE :: UNIVERSE CONTROL :: V6_BackHole",
             font=("Consolas", 18, "bold"),
             bg=self.theme["bg"],
             fg=self.theme["accent"],
