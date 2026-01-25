@@ -528,7 +528,7 @@ class DBViewer(tk.Tk):
 
     def _show_plots(self) -> None:
         civ_id = self._selected_civ_id()
-        if civ_id is None:
+        if civ_id is None or civ_id == "MASTER":
             messagebox.showinfo("Plots", "Select a civilization first.")
             return
         table = self.mapping.get("cycle_records")
@@ -589,11 +589,11 @@ class DBViewer(tk.Tk):
         for key, values in series.items():
             ax.plot(cycles, values, label=key)
         for marker in markers["stage"]:
-            ax.axvline(marker, color="gray", linestyle=":", linewidth=1)
+            ax.axvline(marker, color="gray", linestyle=":", linewidth=1, alpha=0.5)
         for marker in markers["crisis"]:
-            ax.axvline(marker, color="red", linestyle="--", linewidth=1)
+            ax.axvline(marker, color="red", linestyle="--", linewidth=1, alpha=0.5)
         for marker in markers["contact"]:
-            ax.axvline(marker, color="blue", linestyle="-.", linewidth=1)
+            ax.axvline(marker, color="blue", linestyle="-.", linewidth=1, alpha=0.5)
         ax.set_xlabel("Cycle")
         ax.set_ylabel("Value")
         ax.legend(loc="upper right")
