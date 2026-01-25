@@ -10,8 +10,14 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 
 - Generates a 10‑system universe with planets and physical traits
 - Spawns multiple civilizations with evolving hidden stats + tech stages
+- Tracks stage progression with a continuous progress meter
+- Adds internal dynamics (elite_power, legitimacy, extraction_rate)
 - Uses a deterministic rules engine to drive events + consequences
 - Uses a local LLM (Ollama) only as a narrator/scribe (plain text, no JSON)
+- Supports a fully deterministic No‑LLM mode with fallback narration
+- Adds constrained intent tokens (AGENDA/STANCE/NEWS) that only bias weights
+- Models exploration missions, beacons, and first contact events
+- Includes legitimacy crisis regimes with specific unrest events
 - Displays a sci‑fi control panel UI (Tkinter) with live logs and visuals
 - Exports full simulation snapshots to `.txt`
 - Supports player directives that influence the next cycle
@@ -20,8 +26,8 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 ## Roles (who does what)
 
 - **Rules Engine (DND-like)**: the absolute supervisor of reality. It rolls events, applies consequences, tracks delayed effects, and handles extinction. It is deterministic with a seed.
-- **Civilization AI**: one instance per civ. Reacts only to the mechanical outcomes from the rules engine. Produces plain‑text logs only.
-- **Master AI**: the “vice‑god.” Summarizes the cycle using only the provided mechanical context. It never invents outcomes.
+- **Civilization AI**: one instance per civ. Reacts only to mechanical outcomes. Produces plain‑text logs and constrained intent tokens.
+- **Master AI**: the “vice‑god.” Summarizes the cycle using only mechanical context. It never invents outcomes.
 
 ## Requirements
 
@@ -35,7 +41,13 @@ python Transcendence.py
 ```
 
 The start screen lets you enable Ollama and pick a model without any exports.
-If Ollama is off, the sim runs but produces minimal AI output.
+If Ollama is off (No LLM), the sim runs with deterministic fallback narration and intent proxies.
+
+You can also open the standalone DB viewer:
+
+```bash
+python db_viewer.py path/to/sim.db
+```
 
 ## Prompts (editable per save)
 
@@ -62,11 +74,13 @@ You can inject a one‑off directive into the next cycle:
 ## What you can see
 
 - **Galaxy map**: systems, links, pulses, and events
+- **Map overlay**: missions (dashed), routes (solid), beacons (rings)
 - **System panel**: orbiting planets + hover details
 - **Civ tabs**: live LLM streams per civilization + Master AI (plain text)
-- **Stats tab**: cohesion, inequality, eco pressure, innovation, stability, food, health
+- **Stats tab**: core stats + stage/progress + internal dynamics + agenda/stance/news
 - **World tab**: scars, delayed effects, run settings
 - **Rules tab**: rules engine status (seed, cooldowns, marks, pending effects, recent rules events)
+- **Missions tab**: active missions and outcomes
 - **Player directive**: queued input applied at next cycle
 - **Loading screen**: non‑blocking initialization for new runs
 
@@ -86,8 +100,19 @@ LLMs are great at narrative flavor but can drift or invent state. This project k
 
 - A deterministic rules engine that owns reality
 - Hidden stats to stabilize continuity
-- Strict plain‑text headers for LLM narration (LOG/GOD/TITLE/ANALYSIS)
+- Strict plain‑text headers for LLM narration (LOG/GOD/NEWS/AGENDA/STANCE)
+- Strict master output format (TITLE/SUMMARY/WORLD/NOTES) with auto‑repair
 - Silence on extinction (no LLM output)
+
+## DB viewer
+
+Browse snapshots and narratives without opening the UI:
+
+```bash
+python db_viewer.py path/to/sim.db
+```
+
+The viewer includes cycle summaries, mission markers, narrative tabs, and a plot view.
 
 ## Design philosophy
 
