@@ -15,6 +15,7 @@ from lib.narrative_parser import (
     parse_sections,
     parse_stance,
     strip_control_lines,
+    validate_master_output,
 )
 from lib.rules_engine import (
     AppliedEvent,
@@ -799,7 +800,9 @@ class Simulation:
         if self._universe_ended():
             raise RuntimeError(f"Master LLM called after universe ended at C{cycle_id}")
         if self.llm.mode == "stub":
-            return {"title": "", "log_text": "", "analysis_text": "", "god_text": ""}
+            return self._generate_fallback_master_summary(
+                cycle_id, civ_states, global_events, civ_reports
+            )
         context = self._build_master_context_v2(
             cycle_id, civ_states, global_events, civ_reports
         )
@@ -830,26 +833,56 @@ class Simulation:
             template=self.prompt_templates["master"],
         )
         if result:
+            master_text = result.response
+            reasons = validate_master_output(master_text)
+            if reasons:
+                repair_prompt = self._build_master_repair_prompt(master_text, reasons)
+                repair = self.llm.generate_master_repair(repair_prompt)
+                if repair:
+                    master_text = repair.response
+                    reasons = validate_master_output(master_text)
+                    if reasons:
+                        self.db.add_ai_log(
+                            "error",
+                            None,
+                            cycle_id,
+                            "master_repair",
+                            "repair failed: " + "; ".join(reasons),
+                        )
+                    else:
+                        self.db.add_ai_log(
+                            "error",
+                            None,
+                            cycle_id,
+                            "master_repair",
+                            "repair applied once",
+                        )
+                if reasons:
+                    fallback = self._generate_fallback_master_summary(
+                        cycle_id, civ_states, global_events, civ_reports
+                    )
+                    self.db.add_ai_log(
+                        "error",
+                        None,
+                        cycle_id,
+                        "master_fallback",
+                        "master fallback used",
+                    )
+                    return fallback
+
             sections = parse_sections(
-                result.response, ["TITLE", "LOG", "ANALYSIS", "GOD"]
+                master_text, ["TITLE", "SUMMARY", "WORLD", "NOTES"]
             )
             title = sections.get("TITLE", "").strip() or f"Cycle {cycle_id}"
-            log_text = sections.get("LOG", "").strip()
-            analysis_text = sections.get("ANALYSIS", "").strip()
-            god_text = sections.get("GOD", "").strip()
-            self._log_llm_format_issue(
-                "master",
-                None,
-                cycle_id,
-                result.response,
-                required_headers=["TITLE", "LOG", "ANALYSIS"],
-            )
-            if log_text:
-                self.db.add_ai_log("master", None, cycle_id, "assistant", log_text)
-            if analysis_text:
-                self.db.add_ai_log("master", None, cycle_id, "analysis", analysis_text)
-            if god_text:
-                self.db.add_ai_log("master", None, cycle_id, "god", god_text)
+            summary_text = sections.get("SUMMARY", "").strip()
+            world_text = sections.get("WORLD", "").strip()
+            notes_text = sections.get("NOTES", "").strip()
+            if summary_text:
+                self.db.add_ai_log("master", None, cycle_id, "assistant", summary_text)
+            if world_text:
+                self.db.add_ai_log("master", None, cycle_id, "analysis", world_text)
+            if notes_text:
+                self.db.add_ai_log("master", None, cycle_id, "god", notes_text)
             self.db.add_ai_log("master", None, cycle_id, "prompt", result.prompt)
             self.db.update_cycle_summary(cycle_id, title)
             if stream_callback:
@@ -860,14 +893,14 @@ class Simulation:
                         "civ_id": None,
                         "cycle": cycle_id,
                         "role": "assistant",
-                        "message": log_text,
+                        "message": summary_text,
                     }
                 )
             return {
                 "title": title,
-                "log_text": log_text,
-                "analysis_text": analysis_text,
-                "god_text": god_text,
+                "log_text": summary_text,
+                "analysis_text": world_text,
+                "god_text": notes_text,
                 "model": result.model,
                 "latency_ms": str(result.latency_ms),
             }
@@ -883,17 +916,6 @@ class Simulation:
                 }
             )
         return {"title": "", "log_text": "", "analysis_text": "", "god_text": ""}
-        if stream_callback:
-            stream_callback(
-                {
-                    "type": "log_end",
-                    "scope": "master",
-                    "civ_id": None,
-                    "cycle": cycle_id,
-                    "role": "assistant",
-                    "message": result.log if result else "",
-                }
-            )
 
     def _apply_player_commands(self, cycle_id: int) -> bool:
         raw = self.db.get_setting("player_command_json")
@@ -1438,6 +1460,24 @@ class Simulation:
                 lines.append(f"No signals detected from {civ_name}.")
         return "\n".join(lines)
 
+    def _build_master_repair_prompt(self, raw: str, reasons: List[str]) -> str:
+        reasons_text = "; ".join(reasons) if reasons else "format violation"
+        return (
+            "You must repair the Master Observer output into the strict format below.\n"
+            "Do NOT add facts. Preserve meaning. Plain text only, no markdown.\n"
+            "Required format:\n"
+            "TITLE: <one line>\n"
+            "SUMMARY:\n"
+            "<2-6 lines>\n"
+            "WORLD:\n"
+            "<2-6 lines>\n"
+            "NOTES:\n"
+            "<0-4 lines>\n\n"
+            f"Violation: {reasons_text}\n\n"
+            "Original output:\n"
+            f"{raw}\n"
+        )
+
     def _store_simulation_artifacts(self, cycle_id: int, events: list) -> None:
         """Persist events and store any attached metadata effects."""
         for event in events:
@@ -1543,6 +1583,88 @@ class Simulation:
                 type(civ)(name=name, color=civ.color, summary=civ.summary)
             )
         return deduped
+
+    def _generate_fallback_master_summary(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+    ) -> Dict[str, str]:
+        alive = [civ for civ in civ_states if civ.alive and not civ.extinct]
+        statuses = [self._derive_status(civ) for civ in alive]
+        mood = "Stable"
+        if any(status in ("crisis", "famine") for status in statuses):
+            mood = "Crisis"
+        elif any(status == "unstable" for status in statuses):
+            mood = "Strained"
+        elif not alive:
+            mood = "Collapse"
+        title = f"Cycle {cycle_id} — {mood}"
+
+        summary_lines = []
+        if global_events:
+            summary_lines.append(
+                f"Global event: {self._format_event_title(global_events[0])}."
+            )
+        else:
+            summary_lines.append("No global upheaval dominates the cycle.")
+        if civ_reports:
+            summary_lines.append(
+                f"Reports received from {len(civ_reports)} civilizations."
+            )
+        else:
+            summary_lines.append("No civilization reports were recorded.")
+
+        beacons = self.db.get_setting("global_beacons")
+        beacon_count = 0
+        if beacons:
+            try:
+                data = json.loads(beacons)
+                if isinstance(data, list):
+                    beacon_count = len(data)
+            except json.JSONDecodeError:
+                beacon_count = 0
+        missions = 0
+        contacts = 0
+        space_civs = 0
+        for civ in civ_states:
+            missions += len([m for m in civ.missions if m.get("status") == "enroute"])
+            contacts += len(civ.known_contacts)
+            if civ.stage == "space":
+                space_civs += 1
+
+        world_lines = [
+            f"Civilizations active: {len(alive)}.",
+            f"Space-age civilizations: {space_civs}.",
+            f"Beacons: {beacon_count}. Missions enroute: {missions}. Contacts: {contacts}.",
+        ]
+        notes_lines = []
+        if beacon_count and not alive:
+            notes_lines.append("Signals persist after collapse.")
+        if not notes_lines:
+            notes_lines.append("")
+
+        summary_text = "\n".join(summary_lines[:6]).strip()
+        world_text = "\n".join(world_lines[:6]).strip()
+        notes_text = "\n".join(notes_lines[:4]).strip()
+
+        if summary_text:
+            self.db.add_ai_log("master", None, cycle_id, "assistant", summary_text)
+        if world_text:
+            self.db.add_ai_log("master", None, cycle_id, "analysis", world_text)
+        if notes_text:
+            self.db.add_ai_log("master", None, cycle_id, "god", notes_text)
+        self.db.update_cycle_summary(cycle_id, title)
+
+        return {
+            "title": title,
+            "log_text": summary_text,
+            "analysis_text": world_text,
+            "god_text": notes_text,
+            "model": "",
+            "latency_ms": "0",
+        }
 
     def _event_to_dict(self, event: AppliedEvent) -> Dict[str, object]:
         return {

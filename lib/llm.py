@@ -151,6 +151,22 @@ class LLMClient:
             latency_ms=latency,
         )
 
+    def generate_master_repair(
+        self,
+        prompt: str,
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
+        response, latency = self._call_ollama_stream(prompt, None)
+        if not response:
+            return None
+        return LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
+        )
+
     def generate_obituaries(
         self,
         context: str,

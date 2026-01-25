@@ -86,3 +86,45 @@ def strip_control_lines(text: str) -> str:
     cleaned = re.sub(r"(?im)^\s*STANCE\s*:\s*[A-Z]+\s*$\n?", "", cleaned)
     cleaned = re.sub(r"(?im)^\s*NEWS\s*:\s*.*\s*$\n?", "", cleaned)
     return cleaned.strip()
+
+
+MASTER_HEADERS = ("TITLE", "SUMMARY", "WORLD", "NOTES")
+FORBIDDEN_MARKDOWN = (
+    "**",
+    "```",
+)
+
+
+def validate_master_output(text: str) -> List[str]:
+    reasons: List[str] = []
+    if not text or not text.strip():
+        return ["empty output"]
+    stripped = text.lstrip()
+    if not stripped.startswith("TITLE:"):
+        reasons.append("output must start with TITLE:")
+    upper = text.upper()
+    positions = {}
+    for header in MASTER_HEADERS:
+        count = upper.count(f"{header}:")
+        if count == 0:
+            reasons.append(f"missing header {header}")
+        elif count > 1:
+            reasons.append(f"duplicate header {header}")
+        idx = upper.find(f"{header}:")
+        if idx != -1:
+            positions[header] = idx
+    order = [positions.get(h) for h in MASTER_HEADERS if h in positions]
+    if order and order != sorted(order):
+        reasons.append("headers out of order")
+    for token in FORBIDDEN_MARKDOWN:
+        if token in text:
+            reasons.append(f"forbidden markdown token {token}")
+    for line in text.splitlines():
+        trimmed = line.lstrip()
+        if trimmed.startswith("#"):
+            reasons.append("markdown header detected")
+            break
+        if trimmed.startswith("- ") or trimmed.startswith("* ") or trimmed.startswith("> "):
+            reasons.append("markdown list/quote detected")
+            break
+    return reasons
