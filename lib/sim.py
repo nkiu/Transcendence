@@ -11,6 +11,7 @@ from lib.narrative_parser import (
     AGENDA_TOKENS,
     STANCE_TOKENS,
     parse_agenda,
+    parse_news,
     parse_sections,
     parse_stance,
     strip_control_lines,
@@ -138,6 +139,16 @@ class Simulation:
         end_reason = self.db.get_setting("universe_end_reason")
         ended = self.db.get_setting("universe_ended") == "1"
         marks = self.db.list_marks(None)
+        beacons = []
+        raw_beacons = self.db.get_setting("global_beacons")
+        if raw_beacons:
+            try:
+                data = json.loads(raw_beacons)
+                if isinstance(data, list):
+                    beacons = data
+            except json.JSONDecodeError:
+                beacons = []
+        system_names = [system.name for system in self.db.list_systems()]
         pending = []
         for effect in self.db.list_all_delayed_effects():
             remaining = max(0, effect.cycle_due - cycle_id + 1)
@@ -172,11 +183,17 @@ class Simulation:
             global_marks=marks,
             global_pending_effects=pending,
             cooldowns=cooldowns,
+            beacons=beacons,
+            system_names=system_names,
         )
 
     def _load_civ_states(self) -> List[CivilizationState]:
         civ_states = []
+        planets = {p.id: p for p in self.db.list_planets()}
+        systems = {s.id: s for s in self.db.list_systems()}
         for civ in self.db.list_civilizations():
+            planet = planets.get(civ.home_planet_id)
+            home_system = systems.get(planet.system_id).name if planet and planet.system_id in systems else ""
             progress_raw = self.db.get_setting(f"civ_progress_{civ.id}")
             try:
                 progress = float(progress_raw) if progress_raw is not None else 0.0
@@ -193,6 +210,60 @@ class Simulation:
             if self.llm.mode == "stub":
                 agenda = "SURVIVE"
                 stance = "PRAGMATIC"
+            known_systems = []
+            raw_known = self.db.get_setting(f"civ_known_systems_{civ.id}")
+            if raw_known:
+                try:
+                    data = json.loads(raw_known)
+                    if isinstance(data, list):
+                        known_systems = [str(item) for item in data if item]
+                except json.JSONDecodeError:
+                    known_systems = []
+            if not known_systems and home_system:
+                known_systems = [home_system]
+            raw_missions = self.db.get_setting(f"civ_missions_{civ.id}")
+            missions = []
+            if raw_missions:
+                try:
+                    data = json.loads(raw_missions)
+                    if isinstance(data, list):
+                        missions = data
+                except json.JSONDecodeError:
+                    missions = []
+            raw_contacts = self.db.get_setting(f"civ_contacts_{civ.id}")
+            contacts = []
+            if raw_contacts:
+                try:
+                    data = json.loads(raw_contacts)
+                    if isinstance(data, list):
+                        contacts = [str(item) for item in data if item]
+                except json.JSONDecodeError:
+                    contacts = []
+            raw_intents = self.db.get_setting(f"civ_contact_intents_{civ.id}")
+            contact_intents = {}
+            if raw_intents:
+                try:
+                    data = json.loads(raw_intents)
+                    if isinstance(data, dict):
+                        contact_intents = {str(k): str(v) for k, v in data.items()}
+                except json.JSONDecodeError:
+                    contact_intents = {}
+            raw_routes = self.db.get_setting(f"civ_routes_{civ.id}")
+            established_routes = []
+            if raw_routes:
+                try:
+                    data = json.loads(raw_routes)
+                    if isinstance(data, list):
+                        established_routes = data
+                except json.JSONDecodeError:
+                    established_routes = []
+            raw_reach = self.db.get_setting(f"civ_reach_{civ.id}")
+            try:
+                reach = int(raw_reach) if raw_reach is not None else 0
+            except ValueError:
+                reach = 0
+            if stage == "space" and reach < 1:
+                reach = 1
             stats = CivStats(
                 eco_pressure=civ.eco_pressure,
                 inequality=civ.inequality,
@@ -213,11 +284,18 @@ class Simulation:
                     alive=bool(civ.extinct == 0),
                     extinct=bool(civ.extinct == 1),
                     extinct_cycle=civ.extinct_cycle,
+                    home_system=home_system,
                     stats=stats,
                     progress=progress,
                     stage=stage,
                     agenda=agenda,
                     stance=stance,
+                    known_systems=known_systems,
+                    reach=reach,
+                    missions=missions,
+                    known_contacts=contacts,
+                    contact_intents=contact_intents,
+                    established_routes=established_routes,
                     marks=self.db.list_marks(civ.id),
                     consecutive_extreme_eco=civ.consecutive_extreme_eco,
                     consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
@@ -263,10 +341,29 @@ class Simulation:
             self.db.set_setting(
                 f"civ_progress_{civ.id}", f"{civ.progress:.4f}"
             )
+            self.db.set_setting(
+                f"civ_known_systems_{civ.id}", json.dumps(civ.known_systems)
+            )
+            self.db.set_setting(
+                f"civ_missions_{civ.id}", json.dumps(civ.missions)
+            )
+            self.db.set_setting(
+                f"civ_contacts_{civ.id}", json.dumps(civ.known_contacts)
+            )
+            self.db.set_setting(
+                f"civ_contact_intents_{civ.id}", json.dumps(civ.contact_intents)
+            )
+            self.db.set_setting(
+                f"civ_routes_{civ.id}", json.dumps(civ.established_routes)
+            )
+            self.db.set_setting(
+                f"civ_reach_{civ.id}", str(civ.reach)
+            )
             if not civ.alive:
                 if "Extinct" not in self.db.list_marks(int(civ.id)):
                     self.db.add_mark(cycle_id, int(civ.id), "Extinct")
 
+        civ_ids = {civ.id for civ in civ_states}
         for event in civ_events + global_events:
             title = self._format_event_title(event)
             detail = self._format_event_detail(event)
@@ -279,6 +376,11 @@ class Simulation:
                 "add_marks": event.add_marks,
                 "remove_marks": event.remove_marks,
             }
+            if event.spawn_mission:
+                metadata["spawn_mission"] = event.spawn_mission
+            if event.contact_with:
+                metadata["contact_with"] = event.contact_with
+                metadata["contact_system"] = event.contact_system
             self.db.add_event(cycle_id, event.kind, title, detail, metadata)
             if event.scope == "global":
                 for mark in event.add_marks:
@@ -291,6 +393,22 @@ class Simulation:
                     self.db.add_mark(cycle_id, civ_id, mark)
                 for mark in event.remove_marks:
                     self.db.remove_mark(cycle_id, civ_id, mark)
+            if event.scope == "civ" and event.target not in civ_ids:
+                self.db.add_ai_log(
+                    "error",
+                    None,
+                    cycle_id,
+                    "target",
+                    f"Event target missing: {event.event_id} -> {event.target}",
+                )
+            if event.scope == "global" and event.target not in ("global", None):
+                self.db.add_ai_log(
+                    "error",
+                    None,
+                    cycle_id,
+                    "target",
+                    f"Global event target unexpected: {event.event_id} -> {event.target}",
+                )
 
         for effect in delayed_applied:
             civ_id = None if effect.target == "global" else int(effect.target)
@@ -331,6 +449,7 @@ class Simulation:
             )
 
         self.db.set_setting("event_cooldowns", json.dumps(universe.cooldowns))
+        self.db.set_setting("global_beacons", json.dumps(universe.beacons))
 
     def _check_universe_extinction(
         self, cycle_id: int, civ_states: List[CivilizationState]
@@ -360,15 +479,18 @@ class Simulation:
                 sections = parse_sections(fallback, ["LOG", "GOD"])
                 agenda = parse_agenda(fallback)
                 stance = parse_stance(fallback)
+                news = parse_news(fallback)
                 log_text = strip_control_lines(sections.get("LOG", "").strip())
                 god_text = strip_control_lines(sections.get("GOD", "").strip())
                 self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
                 self.db.set_setting(f"civ_stance_{civ.id}", stance)
+                self.db.set_setting(f"civ_news_{civ.id}", news)
                 reports[civ.id] = {
                     "log_text": log_text,
                     "god_text": god_text,
                     "agenda": agenda,
                     "stance": stance,
+                    "news": news,
                     "model": "",
                     "latency_ms": "0",
                 }
@@ -381,7 +503,7 @@ class Simulation:
                     int(civ.id),
                     cycle_id,
                     "intent",
-                    f"AGENDA: {agenda}\nSTANCE: {stance}",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}\nNEWS: {news}",
                 )
                 continue
             if civ.extinct or not civ.alive:
@@ -419,6 +541,7 @@ class Simulation:
                 sections = parse_sections(result.response, ["LOG", "GOD"])
                 agenda = parse_agenda(result.response)
                 stance = parse_stance(result.response)
+                news = parse_news(result.response)
                 log_text = strip_control_lines(sections.get("LOG", "").strip())
                 god_text = strip_control_lines(sections.get("GOD", "").strip())
                 self._log_llm_format_issue(
@@ -430,11 +553,13 @@ class Simulation:
                 )
                 self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
                 self.db.set_setting(f"civ_stance_{civ.id}", stance)
+                self.db.set_setting(f"civ_news_{civ.id}", news)
                 reports[civ.id] = {
                     "log_text": log_text,
                     "god_text": god_text,
                     "agenda": agenda,
                     "stance": stance,
+                    "news": news,
                     "model": result.model,
                     "latency_ms": str(result.latency_ms),
                 }
@@ -447,7 +572,7 @@ class Simulation:
                     int(civ.id),
                     cycle_id,
                     "intent",
-                    f"AGENDA: {agenda}\nSTANCE: {stance}",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}\nNEWS: {news}",
                 )
                 self.db.add_ai_log("civ", int(civ.id), cycle_id, "prompt", result.prompt)
             if stream_callback:
@@ -520,6 +645,35 @@ class Simulation:
             return high_text
         return mid_text
 
+    def _fallback_news_line(
+        self, civ: CivilizationState, events: List[AppliedEvent], rng: random.Random
+    ) -> str:
+        if not events:
+            return "Quiet cycle; tensions persist."
+        mission = next((e for e in events if e.event_id.startswith("MISSION_")), None)
+        if mission:
+            title = self._format_event_title(mission)
+            return f"{title}."
+        launch = next((e for e in events if e.spawn_mission), None)
+        if launch and isinstance(launch.spawn_mission, dict):
+            target = launch.spawn_mission.get("to_system")
+            return f"Mission launched toward {target}."
+        contact = next((e for e in events if e.event_id.startswith("EVT_CONTACT")), None)
+        if contact:
+            options = [
+                "Signal detected; councils argue its meaning.",
+                "Unfamiliar beacon stirs hope and fear.",
+                "Contact rumors spread across the cities.",
+            ]
+            return rng.choice(options)
+        main = self._format_event_title(events[0])
+        options = [
+            f"{main} shapes a tense cycle.",
+            f"{main} dominates public attention.",
+            f"{main} marks the turning point this cycle.",
+        ]
+        return rng.choice(options)
+
     def _generate_fallback_civ_text(
         self, civ: CivilizationState, events: List[AppliedEvent], cycle_id: int
     ) -> str:
@@ -528,13 +682,28 @@ class Simulation:
         stance = self._infer_stance_proxy(civ)
 
         sentences: List[str] = []
-        if events:
+        mission_events = [e for e in events if e.event_id.startswith("MISSION_")]
+        launch_events = [e for e in events if e.spawn_mission]
+        contact_events = [e for e in events if e.event_id.startswith("EVT_CONTACT")]
+        if mission_events:
+            outcome = self._format_event_title(mission_events[0]).lower()
+            sentences.append(f"Our skywatchers report {outcome}.")
+        elif launch_events:
+            launch = launch_events[0].spawn_mission
+            if isinstance(launch, dict):
+                sentences.append(
+                    f"A {launch.get('type')} mission departs toward {launch.get('to_system')}."
+                )
+        elif contact_events:
+            sentences.append("A strange signal stirs debate in our halls.")
+        elif events:
             titles = [self._format_event_title(e) for e in events]
             if len(titles) == 1:
                 sentences.append(f"This cycle brings {titles[0].lower()}.")
             else:
                 pair = ", ".join(t.lower() for t in titles[:2])
                 sentences.append(f"This cycle brings {pair}.")
+
         stats = civ.stats
         sentences.append(
             self._qualitative(
@@ -566,16 +735,12 @@ class Simulation:
                 "Order wavers but does not break.",
             )
         )
-        sentences.append(
-            self._qualitative(
-                stats.cohesion,
-                0.35,
-                0.70,
-                "We feel pulled apart in daily life.",
-                "We move in step more often than not.",
-                "We drift between unity and friction.",
-            )
-        )
+        if stats.cohesion <= 0.35:
+            sentences.append("We feel pulled apart in daily life.")
+        elif stats.cohesion >= 0.70:
+            sentences.append("We move in step more often than not.")
+        else:
+            sentences.append("We drift between unity and friction.")
         if stats.innovation >= 0.70:
             sentences.append("New ideas spread quickly, and tools change hands.")
         elif stats.innovation <= 0.30:
@@ -611,6 +776,8 @@ class Simulation:
             )
         god_text = " ".join(god_parts)
 
+        news = self._fallback_news_line(civ, events, rng)
+
         return (
             "LOG:\n"
             f"{log_text}\n"
@@ -618,6 +785,7 @@ class Simulation:
             f"{god_text}\n"
             f"AGENDA: {agenda}\n"
             f"STANCE: {stance}\n"
+            f"NEWS: {news}\n"
         )
 
     def _run_master_scribe(
@@ -892,6 +1060,7 @@ class Simulation:
             self.db.set_setting(f"civ_progress_{civ_id}", "0.0000")
             self.db.set_setting(f"civ_agenda_{civ_id}", "SURVIVE")
             self.db.set_setting(f"civ_stance_{civ_id}", "PRAGMATIC")
+            self.db.set_setting(f"civ_news_{civ_id}", "Quiet cycle; tensions persist.")
             self.db.add_ai_log(
                 "civ",
                 civ_id,
@@ -1211,6 +1380,23 @@ class Simulation:
             f"extraction_rate={civ.stats.extraction_rate:.2f}"
         )
         lines.append(f"Stage: {civ.stage} (progress={civ.progress:.2f})")
+        lines.append(
+            "Exploration: "
+            f"reach={civ.reach} | known_systems={len(civ.known_systems)} | "
+            f"contacts={len(civ.known_contacts)} | missions_enroute="
+            f"{len([m for m in civ.missions if m.get('status') == 'enroute'])}"
+        )
+        if civ.known_contacts:
+            lines.append("Known contacts: " + ", ".join(civ.known_contacts[:3]))
+        if civ.missions:
+            lines.append("Missions:")
+            for mission in civ.missions[:3]:
+                if not isinstance(mission, dict):
+                    continue
+                lines.append(
+                    f"- {mission.get('type')} to {mission.get('to_system')} "
+                    f"(eta={mission.get('eta')}, status={mission.get('status')})"
+                )
         lines.append("Marks: " + (", ".join(civ.marks) if civ.marks else "none"))
         recent = list(reversed(self.db.list_ai_logs("civ", int(civ.id), limit=3)))
         if recent:
@@ -1317,6 +1503,14 @@ class Simulation:
         if event.deltas:
             deltas = ", ".join(f"{k}={v:+.2f}" for k, v in event.deltas.items())
             parts.append(f"deltas: {deltas}")
+        if event.spawn_mission:
+            mission = event.spawn_mission
+            parts.append(
+                f"mission: {mission.get('type')} to {mission.get('to_system')} "
+                f"(eta={mission.get('eta')})"
+            )
+        if event.contact_with:
+            parts.append(f"contact_with: {event.contact_with}")
         if event.add_marks:
             parts.append("add_marks: " + ", ".join(event.add_marks))
         if event.remove_marks:
@@ -1360,6 +1554,9 @@ class Simulation:
             "deltas": event.deltas,
             "add_marks": event.add_marks,
             "remove_marks": event.remove_marks,
+            "spawn_mission": event.spawn_mission,
+            "contact_with": event.contact_with,
+            "contact_system": event.contact_system,
         }
 
     def _delayed_to_dict(self, effect: DelayedEffect) -> Dict[str, object]:
@@ -1430,6 +1627,7 @@ class Simulation:
                         "god_text": narrative.get("god_text", ""),
                         "agenda": narrative.get("agenda", ""),
                         "stance": narrative.get("stance", ""),
+                        "news": narrative.get("news", ""),
                     },
                     "meta": {
                         "llm_model": narrative.get("model", ""),
@@ -1494,8 +1692,8 @@ class Simulation:
         civ = None
         if event.scope == "civ":
             civ = next((c for c in civ_states if c.id == str(target)), None)
-        applied = self.rules_engine._make_applied_event(event, str(target), civ)
         universe = self._load_universe_state(cycle_id)
+        applied = self.rules_engine._make_applied_event(event, str(target), civ, universe)
         if applied.scope == "global":
             self.rules_engine._apply_event(applied, civ_states, universe)
         else:

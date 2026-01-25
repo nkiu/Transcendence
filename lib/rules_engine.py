@@ -71,11 +71,18 @@ class CivilizationState:
     alive: bool
     extinct: bool
     extinct_cycle: Optional[int]
+    home_system: str
     stats: CivStats
     progress: float = 0.0
     stage: str = "stone"
     agenda: str = "SURVIVE"
     stance: str = "PRAGMATIC"
+    known_systems: List[str] = field(default_factory=list)
+    reach: int = 0
+    missions: List[Dict[str, object]] = field(default_factory=list)
+    known_contacts: List[str] = field(default_factory=list)
+    contact_intents: Dict[str, str] = field(default_factory=dict)
+    established_routes: List[Dict[str, object]] = field(default_factory=list)
     marks: List[str] = field(default_factory=list)
     consecutive_extreme_eco: int = 0
     consecutive_extreme_unrest: int = 0
@@ -102,6 +109,8 @@ class UniverseState:
     global_marks: List[str]
     global_pending_effects: List[DelayedEffect]
     cooldowns: Dict[str, int] = field(default_factory=dict)
+    beacons: List[Dict[str, object]] = field(default_factory=list)
+    system_names: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -131,6 +140,9 @@ class AppliedEvent:
     add_marks: List[str]
     remove_marks: List[str]
     delayed_effects: List[DelayedEffect]
+    spawn_mission: Optional[Dict[str, object]] = None
+    contact_with: Optional[str] = None
+    contact_system: Optional[str] = None
 
 
 def clamp(value: float) -> float:
@@ -177,25 +189,110 @@ class _PreconditionEvaluator(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name):
         if node.id in STAT_KEYS:
             return getattr(self.civ.stats, node.id)
+        if node.id == "reach":
+            return self.civ.reach
+        if node.id == "missions_total":
+            return len(self.civ.missions)
+        if node.id == "has_any_beacon_in_unknown_system":
+            return self._has_any_beacon_in_unknown_system()
+        if node.id == "detects_foreign_beacon":
+            return self._detects_foreign_beacon()
+        if node.id == "shares_system_with_foreign_outpost":
+            return self._shares_system_with_foreign_outpost()
+        if node.id == "has_contact":
+            return bool(self.civ.known_contacts)
+        if node.id == "relation_intent":
+            return self._relation_intent()
         raise ValueError(f"Unknown name {node.id}")
 
     def visit_Constant(self, node: ast.Constant):
         return node.value
 
     def visit_Call(self, node: ast.Call):
-        if not isinstance(node.func, ast.Name) or len(node.args) != 1:
+        if not isinstance(node.func, ast.Name):
             raise ValueError("Unsupported function call")
-        arg = self.visit(node.args[0])
-        if not isinstance(arg, str):
-            raise ValueError("Mark name must be string")
-        if node.func.id == "has_mark":
-            return arg in self.civ.marks
-        if node.func.id == "has_global":
-            return arg in self.universe.global_marks
+        if node.func.id in ("has_mark", "has_global"):
+            if len(node.args) != 1:
+                raise ValueError("Mark call requires one argument")
+            arg = self.visit(node.args[0])
+            if not isinstance(arg, str):
+                raise ValueError("Mark name must be string")
+            if node.func.id == "has_mark":
+                return arg in self.civ.marks
+            if node.func.id == "has_global":
+                return arg in self.universe.global_marks
+        if node.func.id == "missions_count":
+            if node.args:
+                raise ValueError("missions_count expects keyword args only")
+            filters = {}
+            for kw in node.keywords:
+                if not isinstance(kw.arg, str):
+                    continue
+                filters[kw.arg] = self.visit(kw.value)
+            return self._missions_count(filters)
         raise ValueError(f"Unsupported function {node.func.id}")
 
     def generic_visit(self, node: ast.AST):
         raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+    def _missions_count(self, filters: Dict[str, object]) -> int:
+        count = 0
+        for mission in self.civ.missions:
+            if not isinstance(mission, dict):
+                continue
+            ok = True
+            for key, value in filters.items():
+                if mission.get(key) != value:
+                    ok = False
+                    break
+            if ok:
+                count += 1
+        return count
+
+    def _has_any_beacon_in_unknown_system(self) -> bool:
+        for beacon in self.universe.beacons:
+            if not isinstance(beacon, dict):
+                continue
+            if beacon.get("owner") != self.civ.id:
+                continue
+            system = beacon.get("system")
+            if system and system != self.civ.home_system:
+                return True
+        return False
+
+    def _detects_foreign_beacon(self) -> bool:
+        for beacon in self.universe.beacons:
+            if not isinstance(beacon, dict):
+                continue
+            if beacon.get("owner") == self.civ.id:
+                continue
+            strength = float(beacon.get("strength", 0.0))
+            if strength <= 0.0:
+                continue
+            return True
+        return False
+
+    def _shares_system_with_foreign_outpost(self) -> bool:
+        owned = {b.get("system") for b in self.universe.beacons if b.get("owner") == self.civ.id}
+        for beacon in self.universe.beacons:
+            if not isinstance(beacon, dict):
+                continue
+            if beacon.get("owner") == self.civ.id:
+                continue
+            system = beacon.get("system")
+            if system and system in owned:
+                return True
+        return False
+
+    def _relation_intent(self) -> str:
+        intents = set(self.civ.contact_intents.values())
+        if "RAID" in intents:
+            return "RAID"
+        if "TRADE" in intents:
+            return "TRADE"
+        if "AVOID" in intents:
+            return "AVOID"
+        return "TRADE"
 
 
 class RulesEngine:
@@ -313,6 +410,11 @@ class RulesEngine:
 
         delayed_applied.extend(self._apply_pending_effects(civs, universe))
 
+        mission_events = self._update_missions(civs, universe)
+        civ_events.extend(mission_events)
+        for event in mission_events:
+            self._apply_event(event, civs, universe)
+
         for civ in civs:
             if not civ.alive:
                 continue
@@ -329,6 +431,110 @@ class RulesEngine:
         civ_events.extend(self._update_progress_and_stage(civs, universe))
 
         return civ_events, global_events, delayed_applied
+
+    def _update_missions(
+        self, civs: List[CivilizationState], universe: UniverseState
+    ) -> List[AppliedEvent]:
+        applied: List[AppliedEvent] = []
+        for beacon in universe.beacons:
+            if not isinstance(beacon, dict):
+                continue
+            strength = float(beacon.get("strength", 0.0))
+            decay = float(beacon.get("decay", 0.0))
+            beacon["strength"] = max(0.0, strength - decay)
+        universe.beacons = [b for b in universe.beacons if b.get("strength", 0.0) > 0.0]
+
+        for civ in civs:
+            if not civ.alive:
+                continue
+            updated = []
+            for mission in civ.missions:
+                if not isinstance(mission, dict):
+                    continue
+                if mission.get("status") != "enroute":
+                    updated.append(mission)
+                    continue
+                mission["eta"] = int(mission.get("eta", 0)) - 1
+                if mission["eta"] > 0:
+                    updated.append(mission)
+                    continue
+                outcome_event, status = self._resolve_mission(civ, mission, universe)
+                mission["status"] = status
+                mission["eta"] = 0
+                updated.append(mission)
+                applied.append(outcome_event)
+            civ.missions = updated
+        return applied
+
+    def _resolve_mission(
+        self,
+        civ: CivilizationState,
+        mission: Dict[str, object],
+        universe: UniverseState,
+    ) -> Tuple[AppliedEvent, str]:
+        mission_type = mission.get("type")
+        to_system = mission.get("to_system")
+        from_system = mission.get("from_system")
+        success = False
+        if mission_type == "probe":
+            base = 0.75
+            mod = (civ.stats.innovation - 0.5) * 0.2
+            mod += (civ.stats.stability - 0.5) * 0.1
+            mod -= (civ.stats.eco_pressure - 0.5) * 0.1
+            success = self.rng.random() < max(0.05, min(0.95, base + mod))
+        elif mission_type == "colony":
+            base = 0.65
+            mod = (civ.stats.food_security - 0.5) * 0.2
+            mod += (civ.stats.health - 0.5) * 0.15
+            mod += (civ.stats.stability - 0.5) * 0.1
+            mod -= (civ.stats.inequality - 0.5) * 0.1
+            success = self.rng.random() < max(0.05, min(0.95, base + mod))
+
+        if success:
+            add_marks = []
+            if to_system and to_system not in civ.known_systems:
+                civ.known_systems.append(to_system)
+            if to_system:
+                universe.beacons.append(
+                    {
+                        "id": f"beacon_{civ.id}_{to_system}_{universe.cycle}",
+                        "system": to_system,
+                        "owner": civ.id,
+                        "strength": 0.7,
+                        "decay": 0.01,
+                        "created_cycle": universe.cycle,
+                    }
+                )
+                add_marks.append(f"Mapped_{to_system}")
+                route = {
+                    "owner": civ.id,
+                    "from_system": from_system,
+                    "to_system": to_system,
+                    "type": mission_type,
+                    "created_cycle": universe.cycle,
+                }
+                if route not in civ.established_routes:
+                    civ.established_routes.append(route)
+            event_id = f"MISSION_{mission_type.upper()}_SUCCESS"
+            add_marks.append(f"{mission_type.title()}Success")
+            if mission_type == "colony":
+                add_marks.append("ExtrasolarOutpost")
+            status = "success"
+        else:
+            event_id = f"MISSION_{mission_type.upper()}_FAILED"
+            add_marks = ["LostProbe"] if mission_type == "probe" else ["FrontierDisaster"]
+            status = "failed"
+        return AppliedEvent(
+            event_id=event_id,
+            kind="cosmic",
+            scope="civ",
+            severity=2,
+            target=civ.id,
+            deltas={},
+            add_marks=add_marks,
+            remove_marks=[],
+            delayed_effects=[],
+        ), status
 
     def _apply_internal_drift(self, civs: List[CivilizationState]) -> None:
         for civ in civs:
@@ -377,7 +583,7 @@ class RulesEngine:
             if not eligible:
                 break
             event = self._weighted_pick(eligible, civ, universe, False)
-            selected.append(self._make_applied_event(event, civ.id, civ))
+            selected.append(self._make_applied_event(event, civ.id, civ, universe))
             universe.cooldowns[self._cooldown_key(event.id, civ.id)] = universe.cycle
         return selected
 
@@ -397,6 +603,7 @@ class RulesEngine:
             alive=True,
             extinct=False,
             extinct_cycle=None,
+            home_system="",
             stats=CivStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             marks=[],
         )
@@ -407,7 +614,7 @@ class RulesEngine:
             if not eligible:
                 break
             event = self._weighted_pick(eligible, None, universe, global_stage_bias)
-            selected.append(self._make_applied_event(event, "global", None))
+            selected.append(self._make_applied_event(event, "global", None, universe))
             universe.cooldowns[self._cooldown_key(event.id, "global")] = universe.cycle
         return selected
 
@@ -518,10 +725,18 @@ class RulesEngine:
         self,
         event: EventDefinition,
         target: str,
-        civ: Optional[CivilizationState] = None,
+        civ: Optional[CivilizationState],
+        universe: Optional[UniverseState],
     ) -> AppliedEvent:
         severity = self.rng.randint(event.severity_range[0], event.severity_range[1])
         effects = event.effects
+        spawn_mission = None
+        contact_with = None
+        contact_system = None
+        if civ is not None and universe is not None:
+            spawn_mission = self._build_spawn_mission(event, civ, universe)
+            contact_with, contact_system = self._pick_contact_target(event, civ, universe)
+        effects = self._adjust_event_effects(event, effects, civ)
         delayed_effects = self._build_delayed_effects(event, target, effects, civ)
         return AppliedEvent(
             event_id=event.id,
@@ -533,6 +748,9 @@ class RulesEngine:
             add_marks=effects.get("add_marks", []),
             remove_marks=effects.get("remove_marks", []),
             delayed_effects=delayed_effects,
+            spawn_mission=spawn_mission,
+            contact_with=contact_with,
+            contact_system=contact_system,
         )
 
     def _build_delayed_effects(
@@ -579,6 +797,101 @@ class RulesEngine:
                         )
                     )
         return delayed
+
+    def _adjust_event_effects(
+        self, event: EventDefinition, effects: Dict[str, object], civ: Optional[CivilizationState]
+    ) -> Dict[str, object]:
+        if civ is None:
+            return effects
+        if event.id == "EVT_CONTACT_SIGNAL":
+            positive = self._contact_signal_positive(civ)
+            if positive:
+                return {
+                    **effects,
+                    "deltas": {"innovation": 0.03, "cohesion": 0.02, "stability": 0.02},
+                }
+            return {
+                **effects,
+                "deltas": {"innovation": 0.03, "cohesion": -0.02, "stability": -0.02},
+            }
+        return effects
+
+    def _contact_signal_positive(self, civ: CivilizationState) -> bool:
+        agenda = (civ.agenda or "").upper()
+        stance = (civ.stance or "").upper()
+        if stance in ("COMPASSIONATE", "ZEALOUS"):
+            return True
+        if stance in ("NIHILISTIC", "CYNICAL"):
+            return False
+        if agenda in ("EXPLORE", "REFORM"):
+            return True
+        if agenda in ("DOMINATE", "WITHDRAW"):
+            return False
+        return civ.stats.legitimacy >= 0.50
+
+    def _build_spawn_mission(
+        self,
+        event: EventDefinition,
+        civ: CivilizationState,
+        universe: UniverseState,
+    ) -> Optional[Dict[str, object]]:
+        spawn = event.effects.get("spawn_mission")
+        if not isinstance(spawn, dict):
+            return None
+        mission_type = spawn.get("type")
+        if mission_type not in ("probe", "colony"):
+            return None
+        system_names = [name for name in universe.system_names if name]
+        if not system_names:
+            return None
+        target = None
+        if mission_type == "probe":
+            candidates = [s for s in system_names if s not in civ.known_systems]
+            if not candidates:
+                return None
+            target = self.rng.choice(sorted(candidates))
+        elif mission_type == "colony":
+            candidates = [s for s in civ.known_systems if s != civ.home_system]
+            if not candidates:
+                return None
+            target = self.rng.choice(sorted(candidates))
+        eta_min = int(spawn.get("eta_min", 2))
+        eta_max = int(spawn.get("eta_max", 5))
+        eta = self.rng.randint(min(eta_min, eta_max), max(eta_min, eta_max))
+        mission_id = f"{mission_type}_{civ.id}_{universe.cycle}_{self.rng.randint(100,999)}"
+        return {
+            "id": mission_id,
+            "type": mission_type,
+            "from_system": civ.home_system,
+            "to_system": target,
+            "eta": eta,
+            "owner": civ.id,
+            "status": "enroute",
+        }
+
+    def _pick_contact_target(
+        self,
+        event: EventDefinition,
+        civ: CivilizationState,
+        universe: UniverseState,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if event.id != "EVT_CONTACT_DIRECT":
+            return None, None
+        owned = {b.get("system") for b in universe.beacons if b.get("owner") == civ.id}
+        candidates = []
+        for beacon in universe.beacons:
+            if not isinstance(beacon, dict):
+                continue
+            owner = beacon.get("owner")
+            system = beacon.get("system")
+            if owner == civ.id:
+                continue
+            if system in owned and system:
+                candidates.append((str(owner), system))
+        if not candidates:
+            return None, None
+        candidates = sorted(candidates)
+        return candidates[0][0], candidates[0][1]
 
     def _outpost_success_payload(self, civ: CivilizationState) -> Dict[str, object]:
         inequality = civ.stats.inequality
@@ -629,6 +942,8 @@ class RulesEngine:
             for mark in event.remove_marks:
                 if mark in civ.marks:
                     civ.marks.remove(mark)
+            if event.spawn_mission and event.scope == "civ":
+                civ.missions.append(event.spawn_mission)
         if event.scope == "global":
             for mark in event.add_marks:
                 if mark not in universe.global_marks:
@@ -636,6 +951,8 @@ class RulesEngine:
             for mark in event.remove_marks:
                 if mark in universe.global_marks:
                     universe.global_marks.remove(mark)
+        if event.contact_with and event.contact_with != event.target:
+            self._register_contact(event, civs)
         for delayed in event.delayed_effects:
             universe.global_pending_effects.append(delayed)
 
@@ -683,6 +1000,35 @@ class RulesEngine:
     def _cooldown_key(self, event_id: str, target: str) -> str:
         return f"{target}:{event_id}"
 
+    def _register_contact(self, event: AppliedEvent, civs: List[CivilizationState]) -> None:
+        civ = next((c for c in civs if c.id == event.target), None)
+        other = next((c for c in civs if c.id == event.contact_with), None)
+        if not civ or not other:
+            return
+        if not civ.alive or not other.alive:
+            return
+        for actor, counterpart in ((civ, other), (other, civ)):
+            if counterpart.id not in actor.known_contacts:
+                actor.known_contacts.append(counterpart.id)
+            if counterpart.id not in actor.contact_intents:
+                actor.contact_intents[counterpart.id] = self._relation_intent(actor)
+            if "ContactEstablished" not in actor.marks:
+                actor.marks.append("ContactEstablished")
+            mark = f"ContactEstablished_{counterpart.id}"
+            if mark not in actor.marks:
+                actor.marks.append(mark)
+
+    def _relation_intent(self, civ: CivilizationState) -> str:
+        agenda = (civ.agenda or "").upper()
+        stance = (civ.stance or "").upper()
+        if agenda == "DOMINATE" or stance == "CYNICAL":
+            return "RAID"
+        if stance == "COMPASSIONATE" and civ.stats.legitimacy >= 0.55:
+            return "TRADE"
+        if agenda == "WITHDRAW" or stance == "NIHILISTIC":
+            return "AVOID"
+        return "TRADE"
+
     def _update_progress_and_stage(
         self, civs: List[CivilizationState], universe: UniverseState
     ) -> List[AppliedEvent]:
@@ -706,6 +1052,21 @@ class RulesEngine:
             if upgraded != civ.stage:
                 civ.stage = upgraded
                 mark = f"Stage_{upgraded}"
+                add_marks = [mark]
+                if upgraded == "space":
+                    civ.reach = max(civ.reach, 1)
+                    add_marks.append("InterstellarAge")
+                    if civ.home_system:
+                        universe.beacons.append(
+                            {
+                                "id": f"beacon_{civ.id}_{civ.home_system}_{universe.cycle}",
+                                "system": civ.home_system,
+                                "owner": civ.id,
+                                "strength": 0.6,
+                                "decay": 0.01,
+                                "created_cycle": universe.cycle,
+                            }
+                        )
                 stage_event = AppliedEvent(
                     event_id=f"STAGE_{upgraded.upper()}",
                     kind="progress",
@@ -713,7 +1074,7 @@ class RulesEngine:
                     severity=1,
                     target=civ.id,
                     deltas={},
-                    add_marks=[mark],
+                    add_marks=add_marks,
                     remove_marks=[],
                     delayed_effects=[],
                 )

@@ -68,9 +68,21 @@ def parse_stance(text: str) -> str:
     return "PRAGMATIC"
 
 
+def parse_news(text: str) -> str:
+    if not text:
+        logging.warning("NEWS defaulted (empty narration).")
+        return "Quiet cycle; tensions persist."
+    match = re.search(r"(?im)^\s*NEWS\s*:\s*(.+?)\s*$", text)
+    if not match:
+        logging.warning("NEWS defaulted (missing token).")
+        return "Quiet cycle; tensions persist."
+    return match.group(1).strip() or "Quiet cycle; tensions persist."
+
+
 def strip_control_lines(text: str) -> str:
     if not text:
         return text
     cleaned = re.sub(r"(?im)^\s*AGENDA\s*:\s*[A-Z]+\s*$\n?", "", text)
     cleaned = re.sub(r"(?im)^\s*STANCE\s*:\s*[A-Z]+\s*$\n?", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*NEWS\s*:\s*.*\s*$\n?", "", cleaned)
     return cleaned.strip()

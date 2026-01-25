@@ -1311,12 +1311,34 @@ class Database:
                 progress = self.get_setting(f"civ_progress_{row['id']}")
                 agenda = self.get_setting(f"civ_agenda_{row['id']}") or "—"
                 stance = self.get_setting(f"civ_stance_{row['id']}") or "—"
+                news = self.get_setting(f"civ_news_{row['id']}") or "—"
+                known_raw = self.get_setting(f"civ_known_systems_{row['id']}") or "[]"
+                missions_raw = self.get_setting(f"civ_missions_{row['id']}") or "[]"
+                contacts_raw = self.get_setting(f"civ_contacts_{row['id']}") or "[]"
                 progress_value = "—"
                 try:
                     if progress is not None:
                         progress_value = f"{float(progress):.2f}"
                 except ValueError:
                     progress_value = "—"
+                try:
+                    known_systems = json.loads(known_raw)
+                    if not isinstance(known_systems, list):
+                        known_systems = []
+                except json.JSONDecodeError:
+                    known_systems = []
+                try:
+                    missions = json.loads(missions_raw)
+                    if not isinstance(missions, list):
+                        missions = []
+                except json.JSONDecodeError:
+                    missions = []
+                try:
+                    contacts = json.loads(contacts_raw)
+                    if not isinstance(contacts, list):
+                        contacts = []
+                except json.JSONDecodeError:
+                    contacts = []
                 lines.append(
                     f"[CIV{row['id']}] {row['name']} | color={row['color']} | "
                     f"home=P{row['home_planet_id']} | level={row['level']} | status={row['status']} | "
@@ -1332,6 +1354,10 @@ class Database:
                     f"legit={row['legitimacy']:.2f}, extract={row['extraction_rate']:.2f}"
                 )
                 lines.append(f"  last_agenda={agenda} | last_stance={stance}")
+                lines.append(f"  last_news={news}")
+                lines.append(f"  known_systems={known_systems}")
+                lines.append(f"  missions={missions}")
+                lines.append(f"  known_contacts={contacts}")
             lines.append("")
 
             cur.execute(
@@ -1366,6 +1392,21 @@ class Database:
                             lines.append(f"  WARNING: invalid event target {target} for civ scope")
                     elif scope == "global" and target not in ("global", None):
                         lines.append(f"  WARNING: unexpected global target {target}")
+            lines.append("")
+
+            lines.append("== BEACONS ==")
+            beacons_raw = self.get_setting("global_beacons") or "[]"
+            try:
+                beacons = json.loads(beacons_raw)
+                if not isinstance(beacons, list):
+                    beacons = []
+            except json.JSONDecodeError:
+                beacons = []
+            if beacons:
+                for beacon in beacons:
+                    lines.append(f"- {beacon}")
+            else:
+                lines.append("(none)")
             lines.append("")
 
             cur.execute(

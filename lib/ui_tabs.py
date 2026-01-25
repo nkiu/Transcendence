@@ -30,6 +30,16 @@ class UITabsMixin:
         raw = self.sim.db.get_setting(f"{key}_{civ_id}")
         return raw.strip() if raw else ""
 
+    def _get_civ_json(self, civ_id: int, key: str, default):
+        raw = self.sim.db.get_setting(f"{key}_{civ_id}")
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return default
+        return data if isinstance(data, type(default)) else default
+
     def _refresh_civ_tabs(self) -> None:
         """Rebuild civilization log tabs (master + civs)."""
         for tab in self.civ_tabs.tabs():
@@ -199,6 +209,63 @@ class UITabsMixin:
                     fg=self.theme["text"],
                 )
                 value_label.grid(row=dynamics_row, column=col_base + 1, sticky="e", padx=(0, 8))
+
+            info_row = tk.Frame(frame, bg=self.theme["panel"])
+            info_row.pack(fill="x", padx=8, pady=(0, 6))
+            known = self._get_civ_json(civ.id, "civ_known_systems", [])
+            contacts = self._get_civ_json(civ.id, "civ_contacts", [])
+            missions = self._get_civ_json(civ.id, "civ_missions", [])
+            news = self._get_civ_token(civ.id, "civ_news") or "—"
+            known_list = ", ".join(known[:3]) if isinstance(known, list) else ""
+            if isinstance(known, list) and len(known) > 3:
+                known_list = f"{known_list} +{len(known) - 3} more"
+            missions_enroute = [
+                m for m in missions if isinstance(m, dict) and m.get("status") == "enroute"
+            ]
+            mission_text = "none"
+            if missions_enroute:
+                short = []
+                for mission in missions_enroute[:2]:
+                    short.append(
+                        f"{mission.get('type')}->{mission.get('to_system')} (eta {mission.get('eta')})"
+                    )
+                mission_text = "; ".join(short)
+                if len(missions_enroute) > 2:
+                    mission_text += f" +{len(missions_enroute) - 2} more"
+            tk.Label(
+                info_row,
+                text=f"Known systems: {known_list or '—'}",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                info_row,
+                text=f"Missions: {mission_text}",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                info_row,
+                text=f"Contacts: {len(contacts) if isinstance(contacts, list) else 0}",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                info_row,
+                text=f"News: {news}",
+                font=("Consolas", 8),
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                anchor="w",
+                wraplength=520,
+                justify="left",
+            ).pack(fill="x")
 
             text = tk.Text(frame, wrap="word")
             self._setup_text_widget(text)

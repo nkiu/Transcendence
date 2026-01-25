@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import datetime as dt
@@ -153,6 +154,52 @@ class AppUI(UITabsMixin, tk.Frame):
         self.canvas = tk.Canvas(
             map_frame, background=self.theme["bg"], highlightthickness=0
         )
+        overlay_controls = tk.Frame(map_frame, bg=self.theme["bg"])
+        overlay_controls.pack(fill="x", padx=8, pady=(6, 0))
+        self.show_missions = tk.BooleanVar(value=True)
+        self.show_routes = tk.BooleanVar(value=True)
+        self.show_beacons = tk.BooleanVar(value=True)
+        self.filter_selected_civ = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show missions",
+            variable=self.show_missions,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show routes",
+            variable=self.show_routes,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show beacons",
+            variable=self.show_beacons,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Only selected civ",
+            variable=self.filter_selected_civ,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._on_canvas_click)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
@@ -530,6 +577,7 @@ class AppUI(UITabsMixin, tk.Frame):
             )
             self._system_items[item] = system.id
         self._draw_hud()
+        self._draw_map_overlay()
 
     def _handle_log_stream(self, payload) -> None:
         """Route streaming chunks to the correct text widget."""
@@ -942,6 +990,146 @@ class AppUI(UITabsMixin, tk.Frame):
             fill=self._alert_color,
             font=("Consolas", 10, "bold"),
         )
+
+    def _draw_map_overlay(self) -> None:
+        self.canvas.delete("overlay")
+        systems = self.sim.db.list_systems()
+        if not systems or not self._system_positions:
+            return
+        name_to_id = {system.name: system.id for system in systems}
+        civs = self.sim.db.list_civilizations()
+        civ_colors = {str(civ.id): civ.color for civ in civs}
+        selected_civ = None
+        if self.filter_selected_civ.get() and self.selected_system_id:
+            for civ in civs:
+                if self._civ_systems.get(civ.id) == self.selected_system_id:
+                    selected_civ = str(civ.id)
+                    break
+
+        beacons = self._load_json_setting("global_beacons", [])
+        if self.show_beacons.get():
+            for beacon in beacons:
+                if not isinstance(beacon, dict):
+                    continue
+                owner = str(beacon.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                system_name = beacon.get("system")
+                if system_name not in name_to_id:
+                    continue
+                system_id = name_to_id[system_name]
+                pos = self._system_positions.get(system_id)
+                if not pos:
+                    continue
+                strength = float(beacon.get("strength", 0.5))
+                radius = 10 + int(strength * 8)
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                x, y = pos
+                self.canvas.create_oval(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    outline=color,
+                    width=2,
+                    tags="overlay",
+                )
+
+        routes = []
+        missions = []
+        for civ in civs:
+            civ_id = str(civ.id)
+            if selected_civ and civ_id != selected_civ:
+                continue
+            routes.extend(self._load_json_setting(f"civ_routes_{civ.id}", []))
+            missions.extend(self._load_json_setting(f"civ_missions_{civ.id}", []))
+
+        if self.show_routes.get():
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                owner = str(route.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                from_name = route.get("from_system")
+                to_name = route.get("to_system")
+                if from_name not in name_to_id or to_name not in name_to_id:
+                    continue
+                a = self._system_positions.get(name_to_id[from_name])
+                b = self._system_positions.get(name_to_id[to_name])
+                if not a or not b:
+                    continue
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                self.canvas.create_line(
+                    a[0],
+                    a[1],
+                    b[0],
+                    b[1],
+                    fill=color,
+                    width=2,
+                    tags="overlay",
+                )
+
+        if self.show_missions.get():
+            for mission in missions:
+                if not isinstance(mission, dict):
+                    continue
+                if mission.get("status") != "enroute":
+                    continue
+                owner = str(mission.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                from_name = mission.get("from_system")
+                to_name = mission.get("to_system")
+                if from_name not in name_to_id or to_name not in name_to_id:
+                    continue
+                a = self._system_positions.get(name_to_id[from_name])
+                b = self._system_positions.get(name_to_id[to_name])
+                if not a or not b:
+                    continue
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                self.canvas.create_line(
+                    a[0],
+                    a[1],
+                    b[0],
+                    b[1],
+                    fill=color,
+                    width=1,
+                    dash=(4, 3),
+                    tags="overlay",
+                )
+                eta = mission.get("eta")
+                if eta is not None:
+                    mx = int((a[0] + b[0]) / 2)
+                    my = int((a[1] + b[1]) / 2)
+                    self.canvas.create_text(
+                        mx,
+                        my - 8,
+                        text=f"ETA {eta}",
+                        fill=self.theme["muted"],
+                        font=("Consolas", 8),
+                        tags="overlay",
+                    )
+
+    def _load_json_setting(self, key: str, default):
+        raw = self.sim.db.get_setting(key)
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return default
+        return data if isinstance(data, type(default)) else default
+
+    def _fallback_civ_color(self, civ_id: str) -> str:
+        try:
+            seed = int(civ_id)
+        except (TypeError, ValueError):
+            seed = sum(ord(ch) for ch in str(civ_id))
+        r = 80 + (seed * 53) % 150
+        g = 80 + (seed * 97) % 150
+        b = 80 + (seed * 193) % 150
+        return f"#{r:02x}{g:02x}{b:02x}"
 
     def _apply_theme(self) -> None:
         self.configure(bg=self.theme["bg"])
