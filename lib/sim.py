@@ -1,0 +1,2390 @@
+import datetime as dt
+import hashlib
+import json
+import os
+import random
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from lib.db import Database, Planet, StarSystem
+from lib.llm import LLMClient
+from lib.narrative_parser import (
+    AGENDA_TOKENS,
+    STANCE_TOKENS,
+    parse_agenda,
+    parse_news,
+    parse_sections,
+    parse_stance,
+    strip_control_lines,
+    validate_master_output,
+)
+from lib.rules_engine import (
+    AppliedEvent,
+    CivilizationState,
+    CivStats,
+    DelayedEffect,
+    RulesEngine,
+    UniverseState,
+)
+from rulesets import create_ruleset, list_available_rulesets
+from prompts.prompts_design import (
+    DEFAULT_CIV_GEN_PROMPT,
+    DEFAULT_CIV_THOUGHT_PROMPT,
+    DEFAULT_EVENTS_PROMPT,
+    DEFAULT_MASTER_PROMPT,
+)
+
+
+class Simulation:
+    """Orchestrates cycle progression, persistence, and LLM-driven narration."""
+    def __init__(self, db: Database) -> None:
+        self.db = db
+        llm_setting = self.db.get_setting("llm_enabled")
+        if llm_setting == "0":
+            mode = "stub"
+        else:
+            mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
+        self.llm = LLMClient(mode=mode)
+        if llm_setting is None:
+            self.db.set_setting("llm_enabled", "1" if mode == "ollama" else "0")
+        self.prompt_seeds = self._load_prompt_seeds()
+        self.prompt_templates = self._load_prompt_templates()
+        self.seed = self._init_seed()
+        available_rulesets = {name for name, _ in list_available_rulesets()}
+        stored_ruleset = self.db.get_setting("ruleset_name") or "harsh_realism"
+        if stored_ruleset not in available_rulesets:
+            stored_ruleset = "harsh_realism"
+            self.db.set_setting("ruleset_name", stored_ruleset)
+        self.ruleset_name = stored_ruleset
+        catalog_path = os.path.join(os.path.dirname(__file__), "events_catalog.json")
+        self.rules_engine = RulesEngine(
+            catalog_path, self.seed, create_ruleset(self.ruleset_name)
+        )
+        self._ensure_universe()
+        self.LEGACY_JSON_MODE = False
+
+    def run_cycles(self, count: int = 1) -> int:
+        """Run N full cycles without streaming callbacks."""
+        if count < 1:
+            return 0
+        cycles_completed = 0
+        for _ in range(count):
+            self._run_single_cycle()
+            cycles_completed += 1
+        return cycles_completed
+
+    def run_cycle_stream(
+        self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
+    ) -> int:
+        """Run a single cycle and stream chunks to the UI."""
+        return self._run_single_cycle(stream_callback)
+
+    def is_ended(self) -> bool:
+        return self._universe_ended()
+
+    def _run_single_cycle(
+        self, stream_callback: Optional[Callable[[Dict[str, str]], None]] = None
+    ) -> int:
+        """Cycle flow: rules engine → LLM scribes (if alive) → master report."""
+        if self._universe_ended():
+            return self.db.get_latest_cycle_id()
+        cycle_id = self._create_cycle()
+        if self._apply_player_commands(cycle_id):
+            self.db.set_setting("last_cycle", str(cycle_id))
+            return cycle_id
+
+        civ_states = self._load_civ_states()
+        universe_state = self._load_universe_state(cycle_id)
+        civ_events, global_events, delayed_applied = self.rules_engine.roll_cycle(
+            civ_states, universe_state
+        )
+        self._persist_rules_results(
+            cycle_id,
+            civ_states,
+            universe_state,
+            civ_events,
+            global_events,
+            delayed_applied,
+        )
+        if self._check_universe_extinction(cycle_id, civ_states):
+            self.db.set_setting("last_cycle", str(cycle_id))
+            return cycle_id
+
+        civ_reports = self._run_civ_scribes(
+            cycle_id, civ_states, civ_events, stream_callback
+        )
+        master_report = self._run_master_scribe(
+            cycle_id, civ_states, global_events, civ_reports, stream_callback
+        )
+        self._store_cycle_record(
+            cycle_id,
+            civ_states,
+            universe_state,
+            civ_events,
+            global_events,
+            civ_reports,
+            master_report,
+            delayed_applied,
+        )
+        self._maybe_log_stat_summary(cycle_id, civ_states)
+        self._maybe_log_fingerprint(cycle_id, civ_states, universe_state)
+        self.db.set_setting("last_cycle", str(cycle_id))
+        return cycle_id
+
+    def _create_cycle(self) -> int:
+        now = dt.datetime.utcnow().isoformat() + "Z"
+        return self.db.add_cycle(now, now, "Cycle completed")
+
+    def _universe_ended(self) -> bool:
+        return self.db.get_setting("universe_ended") == "1"
+
+    def _load_universe_state(self, cycle_id: int) -> UniverseState:
+        end_reason = self.db.get_setting("universe_end_reason")
+        ended = self.db.get_setting("universe_ended") == "1"
+        marks = self.db.list_marks(None)
+        beacons = []
+        raw_beacons = self.db.get_setting("global_beacons")
+        if raw_beacons:
+            try:
+                data = json.loads(raw_beacons)
+                if isinstance(data, list):
+                    beacons = data
+            except json.JSONDecodeError:
+                beacons = []
+        system_names = [system.name for system in self.db.list_systems()]
+        pending = []
+        for effect in self.db.list_all_delayed_effects():
+            remaining = max(0, effect.cycle_due - cycle_id + 1)
+            target = str(effect.civ_id) if effect.civ_id is not None else "global"
+            payload = effect.payload if isinstance(effect.payload, dict) else {}
+            deltas = payload.get("deltas", payload)
+            add_marks = payload.get("add_marks", [])
+            remove_marks = payload.get("remove_marks", [])
+            pending.append(
+                DelayedEffect(
+                    cycle_delay=remaining,
+                    target=target,
+                    deltas=deltas if isinstance(deltas, dict) else {},
+                    add_marks=add_marks if isinstance(add_marks, list) else [],
+                    remove_marks=remove_marks if isinstance(remove_marks, list) else [],
+                )
+            )
+        cooldowns = {}
+        raw = self.db.get_setting("event_cooldowns")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    cooldowns = {str(k): int(v) for k, v in data.items()}
+            except json.JSONDecodeError:
+                cooldowns = {}
+        return UniverseState(
+            cycle=cycle_id,
+            ended=ended,
+            end_reason=end_reason,
+            rng_seed=self.seed,
+            global_marks=marks,
+            global_pending_effects=pending,
+            cooldowns=cooldowns,
+            beacons=beacons,
+            system_names=system_names,
+        )
+
+    def _load_civ_states(self) -> List[CivilizationState]:
+        civ_states = []
+        planets = {p.id: p for p in self.db.list_planets()}
+        systems = {s.id: s for s in self.db.list_systems()}
+        for civ in self.db.list_civilizations():
+            planet = planets.get(civ.home_planet_id)
+            home_system = systems.get(planet.system_id).name if planet and planet.system_id in systems else ""
+            progress_raw = self.db.get_setting(f"civ_progress_{civ.id}")
+            try:
+                progress = float(progress_raw) if progress_raw is not None else 0.0
+            except ValueError:
+                progress = 0.0
+            progress = max(0.0, min(1.0, progress))
+            stage = civ.tech_stage or "stone"
+            agenda = (self.db.get_setting(f"civ_agenda_{civ.id}") or "SURVIVE").strip().upper()
+            if agenda not in AGENDA_TOKENS:
+                agenda = "SURVIVE"
+            stance = (self.db.get_setting(f"civ_stance_{civ.id}") or "PRAGMATIC").strip().upper()
+            if stance not in STANCE_TOKENS:
+                stance = "PRAGMATIC"
+            if self.llm.mode == "stub":
+                agenda = "SURVIVE"
+                stance = "PRAGMATIC"
+            known_systems = []
+            raw_known = self.db.get_setting(f"civ_known_systems_{civ.id}")
+            if raw_known:
+                try:
+                    data = json.loads(raw_known)
+                    if isinstance(data, list):
+                        known_systems = [str(item) for item in data if item]
+                except json.JSONDecodeError:
+                    known_systems = []
+            if not known_systems and home_system:
+                known_systems = [home_system]
+            raw_missions = self.db.get_setting(f"civ_missions_{civ.id}")
+            missions = []
+            if raw_missions:
+                try:
+                    data = json.loads(raw_missions)
+                    if isinstance(data, list):
+                        missions = data
+                except json.JSONDecodeError:
+                    missions = []
+            raw_contacts = self.db.get_setting(f"civ_contacts_{civ.id}")
+            contacts = []
+            if raw_contacts:
+                try:
+                    data = json.loads(raw_contacts)
+                    if isinstance(data, list):
+                        contacts = [str(item) for item in data if item]
+                except json.JSONDecodeError:
+                    contacts = []
+            raw_intents = self.db.get_setting(f"civ_contact_intents_{civ.id}")
+            contact_intents = {}
+            if raw_intents:
+                try:
+                    data = json.loads(raw_intents)
+                    if isinstance(data, dict):
+                        contact_intents = {str(k): str(v) for k, v in data.items()}
+                except json.JSONDecodeError:
+                    contact_intents = {}
+            raw_routes = self.db.get_setting(f"civ_routes_{civ.id}")
+            established_routes = []
+            if raw_routes:
+                try:
+                    data = json.loads(raw_routes)
+                    if isinstance(data, list):
+                        established_routes = data
+                except json.JSONDecodeError:
+                    established_routes = []
+            raw_reach = self.db.get_setting(f"civ_reach_{civ.id}")
+            try:
+                reach = int(raw_reach) if raw_reach is not None else 0
+            except ValueError:
+                reach = 0
+            if stage == "space" and reach < 1:
+                reach = 1
+            stats = CivStats(
+                eco_pressure=civ.eco_pressure,
+                inequality=civ.inequality,
+                cohesion=civ.cohesion,
+                stability=civ.stability,
+                innovation=civ.innovation,
+                food_security=civ.food_security,
+                health=civ.health,
+                elite_power=civ.elite_power,
+                legitimacy=civ.legitimacy,
+                extraction_rate=civ.extraction_rate,
+            )
+            civ_states.append(
+                CivilizationState(
+                    id=str(civ.id),
+                    name=civ.name,
+                    color=civ.color,
+                    alive=bool(civ.extinct == 0),
+                    extinct=bool(civ.extinct == 1),
+                    extinct_cycle=civ.extinct_cycle,
+                    home_system=home_system,
+                    stats=stats,
+                    progress=progress,
+                    stage=stage,
+                    agenda=agenda,
+                    stance=stance,
+                    known_systems=known_systems,
+                    reach=reach,
+                    missions=missions,
+                    known_contacts=contacts,
+                    contact_intents=contact_intents,
+                    established_routes=established_routes,
+                    marks=self.db.list_marks(civ.id),
+                    consecutive_extreme_eco=civ.consecutive_extreme_eco,
+                    consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
+                    consecutive_famine=civ.consecutive_famine,
+                    consecutive_zero_stability=civ.consecutive_zero_stability,
+                    consecutive_good_cycles=civ.consecutive_good_cycles,
+                )
+            )
+        return civ_states
+
+    def _persist_rules_results(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        universe: UniverseState,
+        civ_events: List[AppliedEvent],
+        global_events: List[AppliedEvent],
+        delayed_applied: List[DelayedEffect],
+    ) -> None:
+        for civ in civ_states:
+            self.db.update_civilization(
+                int(civ.id),
+                extinct=1 if civ.extinct or not civ.alive else 0,
+                extinct_cycle=civ.extinct_cycle,
+                status=self._derive_status(civ),
+                cohesion=civ.stats.cohesion,
+                inequality=civ.stats.inequality,
+                eco_pressure=civ.stats.eco_pressure,
+                innovation=civ.stats.innovation,
+                stability=civ.stats.stability,
+                food_security=civ.stats.food_security,
+                health=civ.stats.health,
+                elite_power=civ.stats.elite_power,
+                legitimacy=civ.stats.legitimacy,
+                extraction_rate=civ.stats.extraction_rate,
+                tech_stage=civ.stage,
+                consecutive_extreme_eco=civ.consecutive_extreme_eco,
+                consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
+                consecutive_famine=civ.consecutive_famine,
+                consecutive_zero_stability=civ.consecutive_zero_stability,
+                consecutive_good_cycles=civ.consecutive_good_cycles,
+            )
+            self.db.set_setting(
+                f"civ_progress_{civ.id}", f"{civ.progress:.4f}"
+            )
+            self.db.set_setting(
+                f"civ_known_systems_{civ.id}", json.dumps(civ.known_systems)
+            )
+            self.db.set_setting(
+                f"civ_missions_{civ.id}", json.dumps(civ.missions)
+            )
+            self.db.set_setting(
+                f"civ_contacts_{civ.id}", json.dumps(civ.known_contacts)
+            )
+            self.db.set_setting(
+                f"civ_contact_intents_{civ.id}", json.dumps(civ.contact_intents)
+            )
+            self.db.set_setting(
+                f"civ_routes_{civ.id}", json.dumps(civ.established_routes)
+            )
+            self.db.set_setting(
+                f"civ_reach_{civ.id}", str(civ.reach)
+            )
+            if not civ.alive:
+                if "Extinct" not in self.db.list_marks(int(civ.id)):
+                    self.db.add_mark(cycle_id, int(civ.id), "Extinct")
+
+        civ_ids = {civ.id for civ in civ_states}
+        for event in civ_events + global_events:
+            title = self._format_event_title(event)
+            detail = self._format_event_detail(event)
+            metadata = {
+                "event_id": event.event_id,
+                "scope": event.scope,
+                "target": event.target,
+                "severity": event.severity,
+                "deltas": event.deltas,
+                "add_marks": event.add_marks,
+                "remove_marks": event.remove_marks,
+            }
+            if event.spawn_mission:
+                metadata["spawn_mission"] = event.spawn_mission
+            if event.contact_with:
+                metadata["contact_with"] = event.contact_with
+                metadata["contact_system"] = event.contact_system
+            self.db.add_event(cycle_id, event.kind, title, detail, metadata)
+            if event.scope == "global":
+                for mark in event.add_marks:
+                    self.db.add_mark(cycle_id, None, mark)
+                for mark in event.remove_marks:
+                    self.db.remove_mark(cycle_id, None, mark)
+            else:
+                civ_id = int(event.target)
+                for mark in event.add_marks:
+                    self.db.add_mark(cycle_id, civ_id, mark)
+                for mark in event.remove_marks:
+                    self.db.remove_mark(cycle_id, civ_id, mark)
+            if event.scope == "civ" and event.target not in civ_ids:
+                self.db.add_ai_log(
+                    "error",
+                    None,
+                    cycle_id,
+                    "target",
+                    f"Event target missing: {event.event_id} -> {event.target}",
+                )
+            if event.scope == "global" and event.target not in ("global", None):
+                self.db.add_ai_log(
+                    "error",
+                    None,
+                    cycle_id,
+                    "target",
+                    f"Global event target unexpected: {event.event_id} -> {event.target}",
+                )
+
+        for effect in delayed_applied:
+            civ_id = None if effect.target == "global" else int(effect.target)
+            if effect.target == "global":
+                for mark in effect.add_marks:
+                    self.db.add_mark(cycle_id, None, mark)
+                for mark in effect.remove_marks:
+                    self.db.remove_mark(cycle_id, None, mark)
+            else:
+                for mark in effect.add_marks:
+                    self.db.add_mark(cycle_id, civ_id, mark)
+                for mark in effect.remove_marks:
+                    self.db.remove_mark(cycle_id, civ_id, mark)
+
+        self.db.clear_delayed_effects()
+        for effect in universe.global_pending_effects:
+            cycle_due = cycle_id + max(1, effect.cycle_delay)
+            civ_id = None if effect.target == "global" else int(effect.target)
+            payload = {
+                "deltas": effect.deltas,
+                "add_marks": effect.add_marks,
+                "remove_marks": effect.remove_marks,
+            }
+            self.db.add_delayed_effect(cycle_due, civ_id, "delayed", payload)
+
+        for effect in delayed_applied:
+            self.db.add_applied_effect(
+                cycle_id,
+                None if effect.target == "global" else int(effect.target),
+                "delayed_applied",
+                {
+                    "deltas": effect.deltas,
+                    "add_marks": effect.add_marks,
+                    "remove_marks": effect.remove_marks,
+                },
+                None,
+                self._now(),
+            )
+
+        self.db.set_setting("event_cooldowns", json.dumps(universe.cooldowns))
+        self.db.set_setting("global_beacons", json.dumps(universe.beacons))
+
+    def _check_universe_extinction(
+        self, cycle_id: int, civ_states: List[CivilizationState]
+    ) -> bool:
+        if any(civ.alive for civ in civ_states):
+            return False
+        self.db.set_setting("universe_ended", "1")
+        self.db.set_setting("universe_end_reason", "No signals detected")
+        self.db.update_cycle_summary(cycle_id, "Universe ended: No signals detected")
+        return True
+
+    def _run_civ_scribes(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        civ_events: List[AppliedEvent],
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> Dict[str, Dict[str, str]]:
+        reports: Dict[str, Dict[str, str]] = {}
+        for civ in civ_states:
+            if not civ.alive or civ.extinct:
+                continue
+            events = [e for e in civ_events if e.target == civ.id]
+            context = self._build_civ_context(cycle_id, civ, events)
+            if self.llm.mode == "stub":
+                fallback = self._generate_fallback_civ_text(civ, events, cycle_id)
+                sections = parse_sections(fallback, ["LOG", "GOD"])
+                agenda = parse_agenda(fallback)
+                stance = parse_stance(fallback)
+                news = parse_news(fallback)
+                log_text = strip_control_lines(sections.get("LOG", "").strip())
+                god_text = strip_control_lines(sections.get("GOD", "").strip())
+                self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
+                self.db.set_setting(f"civ_stance_{civ.id}", stance)
+                self.db.set_setting(f"civ_news_{civ.id}", news)
+                reports[civ.id] = {
+                    "log_text": log_text,
+                    "god_text": god_text,
+                    "agenda": agenda,
+                    "stance": stance,
+                    "news": news,
+                    "model": "",
+                    "latency_ms": "0",
+                }
+                if log_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
+                if god_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
+                self.db.add_ai_log(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    "intent",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}\nNEWS: {news}",
+                )
+                continue
+            if civ.extinct or not civ.alive:
+                raise RuntimeError(
+                    f"LLM call blocked for extinct civ {civ.id} at cycle {cycle_id}"
+                )
+            if stream_callback:
+                stream_callback(
+                    {
+                        "type": "log_start",
+                        "scope": "civ",
+                        "civ_id": civ.id,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                    }
+                )
+            result = self.llm.generate_civ_thought(
+                civ.name,
+                cycle_id,
+                context,
+                on_chunk=(lambda chunk: stream_callback(
+                    {
+                        "type": "log_chunk",
+                        "scope": "civ",
+                        "civ_id": civ.id,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                        "chunk": chunk,
+                    }
+                )) if stream_callback else None,
+                prompt_seed="",
+                template=self.prompt_templates["civ_thought"],
+            )
+            if result:
+                sections = parse_sections(result.response, ["LOG", "GOD"])
+                agenda = parse_agenda(result.response)
+                stance = parse_stance(result.response)
+                news = parse_news(result.response)
+                log_text = strip_control_lines(sections.get("LOG", "").strip())
+                god_text = strip_control_lines(sections.get("GOD", "").strip())
+                self._log_llm_format_issue(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    result.response,
+                    required_headers=["LOG"],
+                )
+                self.db.set_setting(f"civ_agenda_{civ.id}", agenda)
+                self.db.set_setting(f"civ_stance_{civ.id}", stance)
+                self.db.set_setting(f"civ_news_{civ.id}", news)
+                reports[civ.id] = {
+                    "log_text": log_text,
+                    "god_text": god_text,
+                    "agenda": agenda,
+                    "stance": stance,
+                    "news": news,
+                    "model": result.model,
+                    "latency_ms": str(result.latency_ms),
+                }
+                if log_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "assistant", log_text)
+                if god_text:
+                    self.db.add_ai_log("civ", int(civ.id), cycle_id, "god", god_text)
+                self.db.add_ai_log(
+                    "civ",
+                    int(civ.id),
+                    cycle_id,
+                    "intent",
+                    f"AGENDA: {agenda}\nSTANCE: {stance}\nNEWS: {news}",
+                )
+                self.db.add_ai_log("civ", int(civ.id), cycle_id, "prompt", result.prompt)
+            if stream_callback:
+                stream_callback(
+                    {
+                        "type": "log_end",
+                        "scope": "civ",
+                        "civ_id": civ.id,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                        "message": reports.get(civ.id, {}).get("log_text", ""),
+                    }
+                )
+        for civ in civ_states:
+            if (civ.extinct or not civ.alive) and civ.id in reports:
+                raise RuntimeError(
+                    f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
+                )
+        return reports
+
+    def _infer_agenda_proxy(self, civ: CivilizationState) -> str:
+        stats = civ.stats
+        if stats.food_security <= 0.35 or stats.health <= 0.35:
+            return "SURVIVE"
+        if stats.stability <= 0.30 or stats.cohesion <= 0.30:
+            return "WITHDRAW"
+        if civ.progress >= 0.60 and stats.stability >= 0.40 and stats.innovation >= 0.40:
+            return "EXPLORE"
+        if (
+            stats.inequality >= 0.65
+            and stats.elite_power >= 0.55
+            and stats.legitimacy <= 0.45
+        ):
+            return "DOMINATE"
+        if (
+            stats.inequality >= 0.60
+            and stats.legitimacy >= 0.45
+            and stats.innovation >= 0.45
+        ):
+            return "REFORM"
+        return "SURVIVE"
+
+    def _infer_stance_proxy(self, civ: CivilizationState) -> str:
+        marks = set(civ.marks)
+        if marks.intersection({"SacredTaboo", "CelestialCult", "CultOfSalvation"}):
+            return "ZEALOUS"
+        if (
+            civ.stats.elite_power >= 0.65
+            or marks.intersection({"RentSeeking", "OligarchicLock", "BlackMarketNetworks"})
+        ):
+            return "CYNICAL"
+        if civ.stats.legitimacy >= 0.60 and civ.stats.inequality <= 0.45:
+            return "COMPASSIONATE"
+        if civ.stats.cohesion <= 0.25 or civ.stats.stability <= 0.25:
+            return "NIHILISTIC"
+        return "PRAGMATIC"
+
+    def _fallback_rng(self, cycle_id: int, civ_id: str) -> random.Random:
+        try:
+            civ_seed = int(civ_id)
+        except ValueError:
+            civ_seed = sum(ord(ch) for ch in civ_id)
+        seed = self.seed * 1000003 + cycle_id * 97 + civ_seed * 31
+        return random.Random(seed)
+
+    def _qualitative(self, value: float, low: float, high: float, low_text: str, high_text: str, mid_text: str) -> str:
+        if value <= low:
+            return low_text
+        if value >= high:
+            return high_text
+        return mid_text
+
+    def _fallback_news_line(
+        self, civ: CivilizationState, events: List[AppliedEvent], rng: random.Random
+    ) -> str:
+        if not events:
+            return "Quiet cycle; tensions persist."
+        mission = next((e for e in events if e.event_id.startswith("MISSION_")), None)
+        if mission:
+            title = self._format_event_title(mission)
+            return f"{title}."
+        launch = next((e for e in events if e.spawn_mission), None)
+        if launch and isinstance(launch.spawn_mission, dict):
+            target = launch.spawn_mission.get("to_system")
+            return f"Mission launched toward {target}."
+        contact = next((e for e in events if e.event_id.startswith("EVT_CONTACT")), None)
+        if contact:
+            options = [
+                "Signal detected; councils argue its meaning.",
+                "Unfamiliar beacon stirs hope and fear.",
+                "Contact rumors spread across the cities.",
+            ]
+            return rng.choice(options)
+        main = self._format_event_title(events[0])
+        options = [
+            f"{main} shapes a tense cycle.",
+            f"{main} dominates public attention.",
+            f"{main} marks the turning point this cycle.",
+        ]
+        return rng.choice(options)
+
+    def _generate_fallback_civ_text(
+        self, civ: CivilizationState, events: List[AppliedEvent], cycle_id: int
+    ) -> str:
+        rng = self._fallback_rng(cycle_id, civ.id)
+        agenda = self._infer_agenda_proxy(civ)
+        stance = self._infer_stance_proxy(civ)
+
+        sentences: List[str] = []
+        mission_events = [e for e in events if e.event_id.startswith("MISSION_")]
+        launch_events = [e for e in events if e.spawn_mission]
+        contact_events = [e for e in events if e.event_id.startswith("EVT_CONTACT")]
+        if mission_events:
+            outcome = self._format_event_title(mission_events[0]).lower()
+            sentences.append(f"Our skywatchers report {outcome}.")
+        elif launch_events:
+            launch = launch_events[0].spawn_mission
+            if isinstance(launch, dict):
+                sentences.append(
+                    f"A {launch.get('type')} mission departs toward {launch.get('to_system')}."
+                )
+        elif contact_events:
+            sentences.append("A strange signal stirs debate in our halls.")
+        elif events:
+            titles = [self._format_event_title(e) for e in events]
+            if len(titles) == 1:
+                sentences.append(f"This cycle brings {titles[0].lower()}.")
+            else:
+                pair = ", ".join(t.lower() for t in titles[:2])
+                sentences.append(f"This cycle brings {pair}.")
+
+        stats = civ.stats
+        sentences.append(
+            self._qualitative(
+                stats.food_security,
+                0.35,
+                0.70,
+                "Food is scarce and rations tighten.",
+                "Stores are steady and meals remain full.",
+                "Meals hold, but nothing feels secure.",
+            )
+        )
+        sentences.append(
+            self._qualitative(
+                stats.health,
+                0.35,
+                0.70,
+                "Illness lingers and bodies weaken.",
+                "Health feels steady and resilience shows.",
+                "Aches and recovery trade places.",
+            )
+        )
+        sentences.append(
+            self._qualitative(
+                stats.stability,
+                0.35,
+                0.70,
+                "Order feels brittle and easily shaken.",
+                "Order holds with a quiet confidence.",
+                "Order wavers but does not break.",
+            )
+        )
+        if stats.cohesion <= 0.35:
+            sentences.append("We feel pulled apart in daily life.")
+        elif stats.cohesion >= 0.70:
+            sentences.append("We move in step more often than not.")
+        else:
+            sentences.append("We drift between unity and friction.")
+        if stats.innovation >= 0.70:
+            sentences.append("New ideas spread quickly, and tools change hands.")
+        elif stats.innovation <= 0.30:
+            sentences.append("Curiosity slows and experiments fall quiet.")
+        if stats.eco_pressure >= 0.70:
+            sentences.append("The land feels strained, and harvests cost more.")
+
+        marks = [m for m in civ.marks if m != "Extinct"]
+        if marks:
+            rng.shuffle(marks)
+            chosen = marks[:2]
+            if chosen:
+                sentences.append(
+                    f"We still speak of {', '.join(chosen)} as omens and memories."
+                )
+
+        rng.shuffle(sentences)
+        if len(sentences) < 3:
+            sentences.append("We endure, watching the horizon for change.")
+        if len(sentences) < 3:
+            sentences.append("The people carry on, wary but alive.")
+        if len(sentences) > 6:
+            sentences = sentences[:6]
+
+        log_text = " ".join(sentences[: max(3, min(6, len(sentences)))])
+        god_parts = [
+            f"Observer note: {civ.name} holds at stage {civ.stage} with progress {int(civ.progress * 100)}%.",
+            f"Key pressures: stability {int(stats.stability * 100)}%, cohesion {int(stats.cohesion * 100)}%, inequality {int(stats.inequality * 100)}%.",
+        ]
+        if events:
+            god_parts.append(
+                "Applied events: " + ", ".join(self._format_event_title(e) for e in events[:2]) + "."
+            )
+        god_text = " ".join(god_parts)
+
+        news = self._fallback_news_line(civ, events, rng)
+
+        return (
+            "LOG:\n"
+            f"{log_text}\n"
+            "GOD:\n"
+            f"{god_text}\n"
+            f"AGENDA: {agenda}\n"
+            f"STANCE: {stance}\n"
+            f"NEWS: {news}\n"
+        )
+
+    def _run_master_scribe(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> Dict[str, str]:
+        if self._universe_ended():
+            raise RuntimeError(f"Master LLM called after universe ended at C{cycle_id}")
+        if self.llm.mode == "stub":
+            return self._generate_fallback_master_summary(
+                cycle_id, civ_states, global_events, civ_reports
+            )
+        context = self._build_master_context_v2(
+            cycle_id, civ_states, global_events, civ_reports
+        )
+        if stream_callback:
+            stream_callback(
+                {
+                    "type": "log_start",
+                    "scope": "master",
+                    "civ_id": None,
+                    "cycle": cycle_id,
+                    "role": "assistant",
+                }
+            )
+        result = self.llm.generate_master_log(
+            cycle_id,
+            context,
+            on_chunk=(lambda chunk: stream_callback(
+                {
+                    "type": "log_chunk",
+                    "scope": "master",
+                    "civ_id": None,
+                    "cycle": cycle_id,
+                    "role": "assistant",
+                    "chunk": chunk,
+                }
+            )) if stream_callback else None,
+            prompt_seed="",
+            template=self.prompt_templates["master"],
+        )
+        if result:
+            master_text = result.response
+            reasons = validate_master_output(master_text)
+            if reasons:
+                repair_prompt = self._build_master_repair_prompt(master_text, reasons)
+                repair = self.llm.generate_master_repair(repair_prompt)
+                if repair:
+                    master_text = repair.response
+                    reasons = validate_master_output(master_text)
+                    if reasons:
+                        self.db.add_ai_log(
+                            "error",
+                            None,
+                            cycle_id,
+                            "master_repair",
+                            "repair failed: " + "; ".join(reasons),
+                        )
+                    else:
+                        self.db.add_ai_log(
+                            "error",
+                            None,
+                            cycle_id,
+                            "master_repair",
+                            "repair applied once",
+                        )
+                if reasons:
+                    fallback = self._generate_fallback_master_summary(
+                        cycle_id, civ_states, global_events, civ_reports
+                    )
+                    self.db.add_ai_log(
+                        "error",
+                        None,
+                        cycle_id,
+                        "master_fallback",
+                        "master fallback used",
+                    )
+                    return fallback
+
+            sections = parse_sections(
+                master_text, ["TITLE", "SUMMARY", "WORLD", "NOTES"]
+            )
+            title = sections.get("TITLE", "").strip() or f"Cycle {cycle_id}"
+            summary_text = sections.get("SUMMARY", "").strip()
+            world_text = sections.get("WORLD", "").strip()
+            notes_text = sections.get("NOTES", "").strip()
+            if summary_text:
+                self.db.add_ai_log("master", None, cycle_id, "assistant", summary_text)
+            if world_text:
+                self.db.add_ai_log("master", None, cycle_id, "analysis", world_text)
+            if notes_text:
+                self.db.add_ai_log("master", None, cycle_id, "god", notes_text)
+            self.db.add_ai_log("master", None, cycle_id, "prompt", result.prompt)
+            self.db.update_cycle_summary(cycle_id, title)
+            if stream_callback:
+                stream_callback(
+                    {
+                        "type": "log_end",
+                        "scope": "master",
+                        "civ_id": None,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                        "message": summary_text,
+                    }
+                )
+            return {
+                "title": title,
+                "log_text": summary_text,
+                "analysis_text": world_text,
+                "god_text": notes_text,
+                "model": result.model,
+                "latency_ms": str(result.latency_ms),
+            }
+        if stream_callback:
+            stream_callback(
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": None,
+                    "cycle": cycle_id,
+                    "role": "assistant",
+                    "message": "",
+                }
+            )
+        return {"title": "", "log_text": "", "analysis_text": "", "god_text": ""}
+
+    def _apply_player_commands(self, cycle_id: int) -> bool:
+        raw = self.db.get_setting("player_command_json")
+        if not raw:
+            return False
+        try:
+            command = json.loads(raw)
+        except json.JSONDecodeError:
+            self.db.set_setting("player_command_json", "")
+            return False
+        self.db.set_setting("player_command_json", "")
+        if not isinstance(command, dict):
+            return False
+        kind = command.get("type")
+        if kind == "END_UNIVERSE":
+            reason = command.get("reason") or "Unknown"
+            self.db.set_setting("universe_ended", "1")
+            self.db.set_setting("universe_end_reason", str(reason))
+            self.db.update_cycle_summary(cycle_id, f"Universe ended: {reason}")
+            self.db.add_ai_log("master", None, cycle_id, "command", f"END_UNIVERSE: {reason}")
+            return True
+        if kind == "KILL_CIV":
+            civ_id = command.get("civ_id")
+            if civ_id is None:
+                return False
+            self.db.update_civilization(int(civ_id), extinct=1, extinct_cycle=cycle_id)
+            self.db.add_mark(cycle_id, int(civ_id), "Extinct")
+            self.db.add_ai_log("master", None, cycle_id, "command", f"KILL_CIV {civ_id}")
+            return False
+        if kind == "SET_GLOBAL_MARK":
+            mark = command.get("mark")
+            if mark:
+                self.db.add_mark(cycle_id, None, str(mark))
+                self.db.add_ai_log("master", None, cycle_id, "command", f"SET_GLOBAL_MARK {mark}")
+            return False
+        if kind == "FORCE_EVENT":
+            event_id = command.get("event_id")
+            target = command.get("target", "global")
+            if event_id:
+                self._force_event(cycle_id, str(event_id), target)
+                self.db.add_ai_log(
+                    "master", None, cycle_id, "command", f"FORCE_EVENT {event_id} -> {target}"
+                )
+            return False
+        return False
+
+    def _ensure_universe(self) -> None:
+        """Create a fresh universe if the DB is empty."""
+        if self.db.universe_exists():
+            return
+        self._seed_universe()
+
+    def _seed_universe(self) -> None:
+        """Initial universe seeding: systems, planets, and first civilizations."""
+        random.seed()
+        systems: List[StarSystem] = []
+        for i in range(10):
+            name = f"SYS-{i + 1:02d}"
+            x = random.uniform(0.1, 0.9)
+            y = random.uniform(0.1, 0.9)
+            system_id = self.db.add_system(name, x, y)
+            systems.append(StarSystem(system_id, name, x, y))
+
+        planet_pool: List[Planet] = []
+        for system in systems:
+            planet_count = random.randint(3, 8)
+            for p in range(planet_count):
+                orbit = round(0.3 + p * random.uniform(0.4, 0.9), 2)
+                size = round(random.uniform(0.6, 2.4), 2)
+                habitability = round(random.uniform(0.0, 1.0), 2)
+                kind = random.choice(
+                    ["rocky", "ocean", "ice", "desert", "gas", "jungle", "metallic"]
+                )
+                richness = round(random.uniform(0.0, 1.0), 2)
+                science = round(random.uniform(0.0, 1.0), 2)
+                name = f"{system.name}-P{p + 1}"
+                planet_id = self.db.add_planet(
+                    system.id,
+                    name,
+                    orbit,
+                    size,
+                    habitability,
+                    kind,
+                    richness,
+                    science,
+                )
+                planet_pool.append(
+                    Planet(
+                        planet_id,
+                        system.id,
+                        name,
+                        orbit,
+                        size,
+                        habitability,
+                        kind,
+                        richness,
+                        science,
+                    )
+                )
+
+        habitable = sorted(
+            planet_pool, key=lambda p: p.habitability, reverse=True
+        )[: random.randint(3, 4)]
+        prompt_planets = [(p.name, p.habitability) for p in habitable]
+        civs, llm_meta = self.llm.generate_civilizations(
+            prompt_planets,
+            len(habitable),
+            template=self.prompt_templates["civ_gen"],
+        )
+        civs = self._dedupe_civ_seeds(civs)
+        if llm_meta:
+            self.db.add_ai_log(
+                "master",
+                None,
+                0,
+                "prompt",
+                llm_meta.prompt,
+            )
+            self.db.add_ai_log(
+                "master",
+                None,
+                0,
+                "assistant",
+                llm_meta.response or "LLM unavailable; fallback civs used.",
+            )
+        for planet, civ in zip(habitable, civs):
+            cohesion = round(random.uniform(0.4, 0.8), 2)
+            inequality = round(random.uniform(0.2, 0.7), 2)
+            eco_pressure = round(random.uniform(0.2, 0.7), 2)
+            innovation = round(random.uniform(0.2, 0.7), 2)
+            stability = round(random.uniform(0.3, 0.8), 2)
+            food_security = round(random.uniform(0.3, 0.9), 2)
+            health = round(random.uniform(0.3, 0.9), 2)
+            elite_power = 0.35
+            legitimacy = 0.55
+            extraction_rate = 0.35
+            tech_stage = "stone"
+            civ_id = self.db.add_civilization(
+                civ.name,
+                civ.color,
+                planet.id,
+                "emerging",
+                "active",
+                0,
+                None,
+                cohesion,
+                inequality,
+                eco_pressure,
+                innovation,
+                stability,
+                food_security,
+                health,
+                elite_power,
+                legitimacy,
+                extraction_rate,
+                tech_stage,
+                "",
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            self.db.set_setting(f"civ_progress_{civ_id}", "0.0000")
+            self.db.set_setting(f"civ_agenda_{civ_id}", "SURVIVE")
+            self.db.set_setting(f"civ_stance_{civ_id}", "PRAGMATIC")
+            self.db.set_setting(f"civ_news_{civ_id}", "Quiet cycle; tensions persist.")
+            self.db.add_ai_log(
+                "civ",
+                civ_id,
+                0,
+                "assistant",
+                f"Birth summary: {civ.summary}",
+            )
+
+    def _run_civ_turns(
+        self,
+        cycle_id: int,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> tuple[str, list]:
+        """Advance civ state and collect their narrative responses."""
+        if not self.LEGACY_JSON_MODE:
+            raise RuntimeError("Legacy JSON mode disabled in V3_DND.")
+        if self.llm.mode == "stub":
+            return "LLM disabled.", []
+        player_directive = self._consume_player_directive(cycle_id)
+        civs = self.db.list_civilizations()
+        systems = {s.id: s for s in self.db.list_systems()}
+        planets = {p.id: p for p in self.db.list_planets()}
+        civ_summaries = []
+        for civ in civs:
+            stats = self._advance_civ_stats(civ)
+            stats = self._apply_breakthroughs(civ, stats)
+            self.db.update_civilization(
+                civ.id,
+                cohesion=stats["cohesion"],
+                inequality=stats["inequality"],
+                eco_pressure=stats["eco_pressure"],
+                innovation=stats["innovation"],
+                stability=stats["stability"],
+                tech_stage=stats["tech_stage"],
+                memory_long=stats["memory_long"],
+            )
+            planet = planets.get(civ.home_planet_id)
+            system = systems.get(planet.system_id) if planet else None
+            recent_logs = self.db.list_ai_logs("civ", civ.id, limit=2)
+            context_lines = [
+                f"Status: {civ.status}. Tech level: {civ.level}.",
+                f"Tech stage: {stats['tech_stage']}.",
+                (
+                    "Stats: cohesion={coh:.2f}, inequality={ineq:.2f}, "
+                    "eco_pressure={eco:.2f}, innovation={inn:.2f}, stability={stab:.2f}."
+                ).format(
+                    coh=stats["cohesion"],
+                    ineq=stats["inequality"],
+                    eco=stats["eco_pressure"],
+                    inn=stats["innovation"],
+                    stab=stats["stability"],
+                ),
+                f"Long memory: {stats['memory_long']}",
+            ]
+            if system:
+                context_lines.append(
+                    f"Home system: {system.name} at ({system.x:.2f}, {system.y:.2f})."
+                )
+            if planet:
+                context_lines.append(
+                    f"Home planet: {planet.name}, orbit {planet.orbit_au:.2f} AU, "
+                    f"size {planet.size:.2f}, habitability {planet.habitability:.2f}."
+                )
+            if recent_logs:
+                short = " | ".join(log.message for log in reversed(recent_logs))
+                context_lines.append(f"Recent memory: {short}")
+            if player_directive and self._directive_applies(player_directive, civ):
+                context_lines.append(
+                    "Player directive (must be obeyed; include verbatim in log): "
+                    f"{player_directive['text']}"
+                )
+            context = "\n".join(context_lines)
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_start",
+                    "scope": "civ",
+                    "civ_id": str(civ.id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                },
+            )
+            result = self.llm.generate_civ_thought(
+                civ.name,
+                cycle_id,
+                context,
+                on_chunk=lambda chunk, civ_id=civ.id: self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_chunk",
+                        "scope": "civ",
+                        "civ_id": str(civ_id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "chunk": chunk,
+                    },
+                ),
+                prompt_seed=self.prompt_seeds.get("civ", ""),
+                template=self.prompt_templates["civ_thought"],
+            )
+            if player_directive and self._directive_applies(player_directive, civ):
+                result = self._enforce_player_directive(
+                    civ,
+                    cycle_id,
+                    context,
+                    result,
+                    player_directive["text"],
+                    stream_callback,
+                )
+            if not result:
+                self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_chunk",
+                        "scope": "civ",
+                        "civ_id": str(civ.id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "chunk": "LLM unavailable.",
+                    },
+                )
+                self._emit_stream(
+                    stream_callback,
+                    {
+                        "type": "log_end",
+                        "scope": "civ",
+                        "civ_id": str(civ.id),
+                        "cycle": str(cycle_id),
+                        "role": "assistant",
+                        "message": "LLM unavailable.",
+                    },
+                )
+                continue
+            updates = result.updates
+            if updates:
+                name = updates.get("name")
+                color = updates.get("color")
+                level = updates.get("level")
+                status = updates.get("status")
+                if color and not self._valid_hex_color(color):
+                    color = None
+                self.db.update_civilization(
+                    civ.id,
+                    name=name,
+                    color=color,
+                    level=level,
+                    status=status,
+                )
+            new_memory = self._build_long_memory(civ, stats, result.log)
+            self.db.update_civilization(civ.id, memory_long=new_memory)
+            civ_name = updates.get("name") if updates else None
+            if not civ_name:
+                civ_name = civ.name
+            self.db.add_ai_log("civ", civ.id, cycle_id, "prompt", result.prompt)
+            self.db.add_ai_log(
+                "civ", civ.id, cycle_id, "assistant", result.log
+            )
+            if result.god:
+                self.db.add_ai_log("civ", civ.id, cycle_id, "god", result.god)
+            civ_summaries.append(
+                {
+                    "civ": civ_name,
+                    "log": result.log,
+                    "god": result.god,
+                    "updates": updates,
+                }
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "civ",
+                    "civ_id": str(civ.id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": result.log,
+                },
+            )
+        civ_context = f"Total civilizations: {len(civs)}."
+        return civ_context, civ_summaries
+
+    def _run_master_narration(
+        self,
+        cycle_id: int,
+        master_context: str,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> None:
+        """Stream the Master AI narrative and persist its outputs."""
+        if not self.LEGACY_JSON_MODE:
+            raise RuntimeError("Legacy JSON mode disabled in V3_DND.")
+        self._emit_stream(
+            stream_callback,
+            {
+                "type": "status",
+                "scope": "master",
+                "civ_id": "",
+                "cycle": str(cycle_id),
+                "role": "system",
+                "message": "Master AI is working...",
+            },
+        )
+        self._emit_stream(
+            stream_callback,
+            {
+                "type": "log_start",
+                "scope": "master",
+                "civ_id": "",
+                "cycle": str(cycle_id),
+                "role": "assistant",
+            },
+        )
+        master = self.llm.generate_master_log(
+            cycle_id,
+            master_context,
+            on_chunk=lambda chunk: self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": chunk,
+                },
+            ),
+            prompt_seed=self.prompt_seeds.get("master", ""),
+            template=self.prompt_templates["master"],
+        )
+        if master:
+            self.db.add_ai_log("master", None, cycle_id, "prompt", master.prompt)
+            self.db.add_ai_log("master", None, cycle_id, "assistant", master.log)
+            self.db.add_ai_log("master", None, cycle_id, "analysis", master.analysis)
+            if master.god:
+                self.db.add_ai_log("master", None, cycle_id, "god", master.god)
+            self.db.update_cycle_summary(cycle_id, master.title)
+            self.db.add_event(
+                cycle_id,
+                "cycle",
+                master.title,
+                master.log,
+                {"analysis": master.analysis, "god": master.god},
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": master.log,
+                },
+            )
+        else:
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": "LLM unavailable.",
+                },
+            )
+            self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_end",
+                    "scope": "master",
+                    "civ_id": "",
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "message": "LLM unavailable.",
+                },
+            )
+            self.db.update_cycle_summary(cycle_id, f"Cycle {cycle_id}")
+            self.db.add_event(
+                cycle_id,
+                "cycle",
+                f"Cycle {cycle_id}",
+                "No master response available.",
+                {},
+            )
+
+    def _build_civ_context(
+        self, cycle_id: int, civ: CivilizationState, events: List[AppliedEvent]
+    ) -> str:
+        lines = [
+            f"Civilization: {civ.name}",
+            f"Cycle: {cycle_id}",
+            "",
+            "Applied events:",
+        ]
+        if events:
+            for event in events:
+                lines.append(f"- {self._format_event_title(event)}")
+                lines.append(f"  {self._format_event_detail(event)}")
+        else:
+            lines.append("- None")
+        lines.append("")
+        lines.append("Stats after effects:")
+        lines.append(
+            "  "
+            f"eco_pressure={civ.stats.eco_pressure:.2f}, "
+            f"inequality={civ.stats.inequality:.2f}, "
+            f"cohesion={civ.stats.cohesion:.2f}, "
+            f"stability={civ.stats.stability:.2f}, "
+            f"innovation={civ.stats.innovation:.2f}, "
+            f"food_security={civ.stats.food_security:.2f}, "
+            f"health={civ.stats.health:.2f}"
+        )
+        lines.append(
+            "  "
+            f"elite_power={civ.stats.elite_power:.2f}, "
+            f"legitimacy={civ.stats.legitimacy:.2f}, "
+            f"extraction_rate={civ.stats.extraction_rate:.2f}"
+        )
+        lines.append(f"Stage: {civ.stage} (progress={civ.progress:.2f})")
+        crisis, severe = self.rules_engine._legitimacy_crisis_levels(civ)
+        if crisis:
+            label = "LEGITIMACY CRISIS (SEVERE)" if severe else "LEGITIMACY CRISIS"
+            lines.append(f"Crisis: {label}")
+        lines.append(
+            "Exploration: "
+            f"reach={civ.reach} | known_systems={len(civ.known_systems)} | "
+            f"contacts={len(civ.known_contacts)} | missions_enroute="
+            f"{len([m for m in civ.missions if m.get('status') == 'enroute'])}"
+        )
+        if civ.known_contacts:
+            lines.append("Known contacts: " + ", ".join(civ.known_contacts[:3]))
+        if civ.missions:
+            lines.append("Missions:")
+            for mission in civ.missions[:3]:
+                if not isinstance(mission, dict):
+                    continue
+                lines.append(
+                    f"- {mission.get('type')} to {mission.get('to_system')} "
+                    f"(eta={mission.get('eta')}, status={mission.get('status')})"
+                )
+        lines.append("Marks: " + (", ".join(civ.marks) if civ.marks else "none"))
+        recent = list(reversed(self.db.list_ai_logs("civ", int(civ.id), limit=3)))
+        if recent:
+            lines.append("")
+            lines.append("Recent memory:")
+            for log in recent:
+                if log.role == "assistant":
+                    lines.append(f"- {log.message}")
+        return "\n".join(lines)
+
+    def _build_master_context_v2(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+    ) -> str:
+        lines = [f"Cycle {cycle_id} summary:"]
+        if global_events:
+            lines.append("Global events:")
+            for event in global_events:
+                lines.append(f"- {self._format_event_title(event)}")
+                lines.append(f"  {self._format_event_detail(event)}")
+        else:
+            lines.append("Global events: none.")
+        lines.append("")
+        lines.append("Civilization reports:")
+        extinct = []
+        for civ in civ_states:
+            if civ.alive and civ.id in civ_reports:
+                log = civ_reports.get(civ.id, {}).get("log_text") or "No report."
+                lines.append(f"- {civ.name}: {log}")
+            else:
+                extinct.append(civ.id)
+        if extinct:
+            lines.append("")
+            for civ_id in extinct:
+                civ_name = next((c.name for c in civ_states if c.id == civ_id), civ_id)
+                lines.append(f"No signals detected from {civ_name}.")
+        return "\n".join(lines)
+
+    def _build_master_repair_prompt(self, raw: str, reasons: List[str]) -> str:
+        reasons_text = "; ".join(reasons) if reasons else "format violation"
+        return (
+            "You must repair the Master Observer output into the strict format below.\n"
+            "Do NOT add facts. Preserve meaning. Plain text only, no markdown.\n"
+            "Required format:\n"
+            "TITLE: <one line>\n"
+            "SUMMARY:\n"
+            "<2-6 lines>\n"
+            "WORLD:\n"
+            "<2-6 lines>\n"
+            "NOTES:\n"
+            "<0-4 lines>\n\n"
+            f"Violation: {reasons_text}\n\n"
+            "Original output:\n"
+            f"{raw}\n"
+        )
+
+    def _store_simulation_artifacts(self, cycle_id: int, events: list) -> None:
+        """Persist events and store any attached metadata effects."""
+        for event in events:
+            self.db.add_event(
+                cycle_id,
+                event.kind,
+                event.title,
+                event.detail,
+                event.metadata,
+            )
+            self._handle_event_metadata(cycle_id, event.metadata)
+
+    def _handle_event_metadata(self, cycle_id: int, metadata: dict) -> None:
+        if not isinstance(metadata, dict):
+            return
+        delayed = metadata.get("delayed_effects", [])
+        if not isinstance(delayed, list):
+            delayed = []
+        for item in delayed:
+            if not isinstance(item, dict):
+                continue
+            delay = int(item.get("cycle_delay", 0) or 0)
+            due = cycle_id + max(1, delay)
+            civ_id = self._resolve_civ(item.get("civ"))
+            kind = str(item.get("kind", "effect"))
+            payload = item.get("delta", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            self.db.add_delayed_effect(due, civ_id, kind, payload)
+        marks = metadata.get("world_marks", [])
+        if not isinstance(marks, list):
+            marks = []
+        for item in marks:
+            if not isinstance(item, dict):
+                continue
+            civ_id = self._resolve_civ(item.get("civ"))
+            label = str(item.get("label", "mark"))
+            impact = str(item.get("impact", ""))
+            self.db.add_world_mark(cycle_id, civ_id, label, impact)
+
+    def _resolve_civ(self, value) -> Optional[int]:
+        if value is None:
+            return None
+        civs = self.db.list_civilizations()
+        if isinstance(value, int):
+            for civ in civs:
+                if civ.id == value:
+                    return civ.id
+        name = str(value).strip()
+        for civ in civs:
+            if civ.name == name:
+                return civ.id
+        return None
+
+    def _format_event_title(self, event: AppliedEvent) -> str:
+        if event.event_id.startswith("COLLAPSE_TABLE"):
+            return f"Collapse outcome ({event.kind})"
+        label = event.event_id.replace("EVT_", "").replace("_", " ").title()
+        return label
+
+    def _format_event_detail(self, event: AppliedEvent) -> str:
+        parts = []
+        if event.deltas:
+            deltas = ", ".join(f"{k}={v:+.2f}" for k, v in event.deltas.items())
+            parts.append(f"deltas: {deltas}")
+        if event.spawn_mission:
+            mission = event.spawn_mission
+            parts.append(
+                f"mission: {mission.get('type')} to {mission.get('to_system')} "
+                f"(eta={mission.get('eta')})"
+            )
+        if event.contact_with:
+            parts.append(f"contact_with: {event.contact_with}")
+        if event.add_marks:
+            parts.append("add_marks: " + ", ".join(event.add_marks))
+        if event.remove_marks:
+            parts.append("remove_marks: " + ", ".join(event.remove_marks))
+        return "; ".join(parts) if parts else "no direct effects"
+
+    def _derive_status(self, civ: CivilizationState) -> str:
+        if not civ.alive or civ.extinct:
+            return "dead"
+        stats = civ.stats
+        if stats.food_security <= 0.20 or stats.health <= 0.20:
+            return "famine"
+        if stats.stability <= 0.20 or stats.cohesion <= 0.20:
+            return "crisis"
+        if stats.eco_pressure >= 0.80 or stats.inequality >= 0.80:
+            return "unstable"
+        if stats.stability >= 0.70 and stats.cohesion >= 0.70:
+            return "stable"
+        return "strained"
+
+    def _dedupe_civ_seeds(self, civs) -> list:
+        seen = set()
+        deduped = []
+        for idx, civ in enumerate(civs, start=1):
+            name = civ.name.strip() if civ.name else ""
+            if not name or name in seen:
+                name = f"CIV-{idx}"
+            seen.add(name)
+            deduped.append(
+                type(civ)(name=name, color=civ.color, summary=civ.summary)
+            )
+        return deduped
+
+    def _generate_fallback_master_summary(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+    ) -> Dict[str, str]:
+        alive = [civ for civ in civ_states if civ.alive and not civ.extinct]
+        statuses = [self._derive_status(civ) for civ in alive]
+        mood = "Stable"
+        if any(status in ("crisis", "famine") for status in statuses):
+            mood = "Crisis"
+        elif any(status == "unstable" for status in statuses):
+            mood = "Strained"
+        elif not alive:
+            mood = "Collapse"
+        title = f"Cycle {cycle_id} — {mood}"
+
+        summary_lines = []
+        if global_events:
+            summary_lines.append(
+                f"Global event: {self._format_event_title(global_events[0])}."
+            )
+        else:
+            summary_lines.append("No global upheaval dominates the cycle.")
+        if civ_reports:
+            summary_lines.append(
+                f"Reports received from {len(civ_reports)} civilizations."
+            )
+        else:
+            summary_lines.append("No civilization reports were recorded.")
+
+        beacons = self.db.get_setting("global_beacons")
+        beacon_count = 0
+        if beacons:
+            try:
+                data = json.loads(beacons)
+                if isinstance(data, list):
+                    beacon_count = len(data)
+            except json.JSONDecodeError:
+                beacon_count = 0
+        missions = 0
+        contacts = 0
+        space_civs = 0
+        for civ in civ_states:
+            missions += len([m for m in civ.missions if m.get("status") == "enroute"])
+            contacts += len(civ.known_contacts)
+            if civ.stage == "space":
+                space_civs += 1
+
+        world_lines = [
+            f"Civilizations active: {len(alive)}.",
+            f"Space-age civilizations: {space_civs}.",
+            f"Beacons: {beacon_count}. Missions enroute: {missions}. Contacts: {contacts}.",
+        ]
+        notes_lines = []
+        if beacon_count and not alive:
+            notes_lines.append("Signals persist after collapse.")
+        if not notes_lines:
+            notes_lines.append("")
+
+        summary_text = "\n".join(summary_lines[:6]).strip()
+        world_text = "\n".join(world_lines[:6]).strip()
+        notes_text = "\n".join(notes_lines[:4]).strip()
+
+        if summary_text:
+            self.db.add_ai_log("master", None, cycle_id, "assistant", summary_text)
+        if world_text:
+            self.db.add_ai_log("master", None, cycle_id, "analysis", world_text)
+        if notes_text:
+            self.db.add_ai_log("master", None, cycle_id, "god", notes_text)
+        self.db.update_cycle_summary(cycle_id, title)
+
+        return {
+            "title": title,
+            "log_text": summary_text,
+            "analysis_text": world_text,
+            "god_text": notes_text,
+            "model": "",
+            "latency_ms": "0",
+        }
+
+    def _event_to_dict(self, event: AppliedEvent) -> Dict[str, object]:
+        return {
+            "event_id": event.event_id,
+            "kind": event.kind,
+            "scope": event.scope,
+            "severity": event.severity,
+            "target": event.target,
+            "deltas": event.deltas,
+            "add_marks": event.add_marks,
+            "remove_marks": event.remove_marks,
+            "spawn_mission": event.spawn_mission,
+            "contact_with": event.contact_with,
+            "contact_system": event.contact_system,
+        }
+
+    def _delayed_to_dict(self, effect: DelayedEffect) -> Dict[str, object]:
+        return {
+            "cycle_delay": effect.cycle_delay,
+            "target": effect.target,
+            "deltas": effect.deltas,
+            "add_marks": effect.add_marks,
+            "remove_marks": effect.remove_marks,
+        }
+
+    def _store_cycle_record(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        universe_state: UniverseState,
+        civ_events: List[AppliedEvent],
+        global_events: List[AppliedEvent],
+        civ_reports: Dict[str, Dict[str, str]],
+        master_report: Dict[str, str],
+        delayed_applied: List[DelayedEffect],
+    ) -> None:
+        record = {
+            "cycle": cycle_id,
+            "rng_seed": universe_state.rng_seed,
+            "llm_enabled": self.llm.mode != "stub",
+            "global": {
+                "global_marks": list(universe_state.global_marks),
+                "global_events_applied": [self._event_to_dict(e) for e in global_events],
+            },
+            "delayed_effects": {
+                "queued": [
+                    self._delayed_to_dict(effect)
+                    for effect in universe_state.global_pending_effects
+                ],
+                "applied": [self._delayed_to_dict(effect) for effect in delayed_applied],
+            },
+            "civilizations": [],
+            "master": {
+                "title": master_report.get("title", ""),
+                "log_text": master_report.get("log_text", ""),
+                "analysis_text": master_report.get("analysis_text", ""),
+                "god_text": master_report.get("god_text", ""),
+                "meta": {
+                    "llm_model": master_report.get("model", ""),
+                    "latency_ms": master_report.get("latency_ms", ""),
+                },
+            },
+        }
+        for civ in civ_states:
+            applied = [self._event_to_dict(e) for e in civ_events if e.target == civ.id]
+            narrative = civ_reports.get(civ.id, {})
+            record["civilizations"].append(
+                {
+                    "civ_id": civ.id,
+                    "name": civ.name,
+                    "color": civ.color,
+                    "alive": civ.alive and not civ.extinct,
+                    "extinct": civ.extinct,
+                    "extinct_cycle": civ.extinct_cycle,
+                    "stats": civ.stats.as_dict(),
+                    "stage": civ.stage,
+                    "progress": civ.progress,
+                    "crisis": {
+                        "legitimacy": self.rules_engine._legitimacy_crisis_levels(civ)[0],
+                        "severe": self.rules_engine._legitimacy_crisis_levels(civ)[1],
+                    },
+                    "world_marks": list(civ.marks),
+                    "applied_events": applied,
+                    "narrative": {
+                        "log_text": narrative.get("log_text", ""),
+                        "god_text": narrative.get("god_text", ""),
+                        "agenda": narrative.get("agenda", ""),
+                        "stance": narrative.get("stance", ""),
+                        "news": narrative.get("news", ""),
+                    },
+                    "meta": {
+                        "llm_model": narrative.get("model", ""),
+                        "latency_ms": narrative.get("latency_ms", ""),
+                    },
+                }
+            )
+        self.db.add_cycle_record(cycle_id, record)
+
+    def _maybe_log_fingerprint(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        universe_state: UniverseState,
+    ) -> None:
+        debug_flag = (
+            os.environ.get("SIM_FINGERPRINT", "0") == "1"
+            or self.db.get_setting("debug_fingerprint") == "1"
+        )
+        if not debug_flag:
+            return
+        snapshot = {
+            "cycle": cycle_id,
+            "global_marks": sorted(universe_state.global_marks),
+            "cooldowns": dict(sorted(universe_state.cooldowns.items())),
+            "pending": [
+                {
+                    "target": effect.target,
+                    "cycle_delay": effect.cycle_delay,
+                    "deltas": effect.deltas,
+                    "add_marks": effect.add_marks,
+                    "remove_marks": effect.remove_marks,
+                }
+                for effect in universe_state.global_pending_effects
+            ],
+            "civilizations": [
+                {
+                    "id": civ.id,
+                    "alive": civ.alive,
+                    "extinct": civ.extinct,
+                    "stage": civ.stage,
+                    "progress": civ.progress,
+                    "stats": civ.stats.as_dict(),
+                    "marks": sorted(civ.marks),
+                }
+                for civ in civ_states
+            ],
+        }
+        payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        self.db.add_ai_log("debug", None, cycle_id, "fingerprint", digest)
+
+    def _maybe_log_stat_summary(
+        self, cycle_id: int, civ_states: List[CivilizationState]
+    ) -> None:
+        debug_flag = (
+            os.environ.get("SIM_STAT_SUMMARY", "0") == "1"
+            or self.db.get_setting("debug_stat_summary") == "1"
+        )
+        if not debug_flag:
+            return
+        legit = [c.stats.legitimacy for c in civ_states if c.alive]
+        innov = [c.stats.innovation for c in civ_states if c.alive]
+        if not legit or not innov:
+            return
+        def _summary(values: List[float]) -> str:
+            return (
+                f"min={min(values):.2f} mean={sum(values)/len(values):.2f} "
+                f"max={max(values):.2f}"
+            )
+        self.db.add_ai_log(
+            "debug",
+            None,
+            cycle_id,
+            "stats",
+            f"legitimacy { _summary(legit)} | innovation { _summary(innov)}",
+        )
+
+    def _force_event(self, cycle_id: int, event_id: str, target: str) -> None:
+        event = None
+        for item in self.rules_engine.events:
+            if item.id == event_id:
+                event = item
+                break
+        if not event:
+            return
+        civ_states = self._load_civ_states()
+        civ = None
+        if event.scope == "civ":
+            civ = next((c for c in civ_states if c.id == str(target)), None)
+        universe = self._load_universe_state(cycle_id)
+        applied = self.rules_engine._make_applied_event(event, str(target), civ, universe)
+        if applied.scope == "global":
+            self.rules_engine._apply_event(applied, civ_states, universe)
+        else:
+            self.rules_engine._apply_event(applied, civ_states, universe)
+        self._persist_rules_results(
+            cycle_id,
+            civ_states,
+            universe,
+            [applied] if applied.scope == "civ" else [],
+            [applied] if applied.scope == "global" else [],
+            [],
+        )
+
+    def _log_llm_format_issue(
+        self,
+        scope: str,
+        civ_id: Optional[int],
+        cycle_id: int,
+        response: Optional[str],
+        required_headers: List[str],
+    ) -> None:
+        if not response:
+            return
+        missing = []
+        upper = response.upper()
+        for header in required_headers:
+            if f"{header}:" not in upper:
+                missing.append(header)
+        contains_json = "{" in response and "}" in response
+        if not missing and not contains_json:
+            return
+        snippet = response.replace("\n", " ")[:400]
+        parts = []
+        if missing:
+            parts.append(f"missing headers: {', '.join(missing)}")
+        if contains_json:
+            parts.append("json_detected")
+        detail = " | ".join(parts) if parts else "format issue"
+        self.db.add_ai_log(
+            "error",
+            civ_id,
+            cycle_id,
+            "format",
+            f"{scope} {detail} | {snippet}",
+        )
+
+    def _now(self) -> str:
+        return dt.datetime.utcnow().isoformat() + "Z"
+
+    def _apply_delayed_effects(self, cycle_id: int) -> str:
+        """Apply queued effects that mature this cycle."""
+        effects = self.db.list_due_effects(cycle_id)
+        if not effects:
+            return "Delayed effects: none."
+        summaries = []
+        for effect in effects:
+            self._apply_effect(effect)
+            self.db.add_applied_effect(
+                cycle_id,
+                effect.civ_id,
+                effect.kind,
+                effect.payload,
+                effect.id,
+                self._now(),
+            )
+            self.db.delete_delayed_effect(effect.id)
+            target = f"CIV{effect.civ_id}" if effect.civ_id else "global"
+            summaries.append(f"{target}:{effect.kind}")
+        return "Delayed effects applied: " + ", ".join(summaries)
+
+    def _apply_effect(self, effect) -> None:
+        delta = effect.payload if isinstance(effect.payload, dict) else {}
+        civ_id = effect.civ_id
+        if civ_id is None:
+            return
+        civs = {civ.id: civ for civ in self.db.list_civilizations()}
+        civ = civs.get(civ_id)
+        if not civ:
+            return
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+        cohesion = clamp(civ.cohesion + float(delta.get("cohesion", 0.0)))
+        inequality = clamp(civ.inequality + float(delta.get("inequality", 0.0)))
+        eco = clamp(civ.eco_pressure + float(delta.get("eco_pressure", 0.0)))
+        innovation = clamp(civ.innovation + float(delta.get("innovation", 0.0)))
+        stability = clamp(civ.stability + float(delta.get("stability", 0.0)))
+        self.db.update_civilization(
+            civ_id,
+            cohesion=cohesion,
+            inequality=inequality,
+            eco_pressure=eco,
+            innovation=innovation,
+            stability=stability,
+        )
+
+    def _apply_chaos(self, cycle_id: int) -> str:
+        """Apply rare, temporary bias profiles to create discontinuities."""
+        if self.llm.mode == "stub":
+            return ""
+        if random.random() < 0.25:
+            self._spawn_chaos_profile(cycle_id)
+        active = self.db.list_active_chaos(cycle_id)
+        if not active:
+            self.db.add_ai_log(
+                "chaos",
+                None,
+                cycle_id,
+                "status",
+                f"Cycle {cycle_id}: No chaotic events.",
+            )
+            return "Chaos: none."
+        summaries = []
+        for profile in active:
+            self._apply_chaos_bias(profile)
+            self.db.add_ai_log(
+                "chaos",
+                profile.civ_id,
+                cycle_id,
+                "profile",
+                (
+                    f"{profile.archetype} | {profile.polarity} | "
+                    f"intensity={profile.intensity:.2f} | "
+                    f"C{profile.cycle_start}-{profile.cycle_end} | "
+                    f"bias={profile.bias_json}"
+                ),
+            )
+            target = f"CIV{profile.civ_id}" if profile.civ_id else "global"
+            summaries.append(f"{target}:{profile.archetype}:{profile.polarity}")
+        return "Chaos active: " + ", ".join(summaries)
+
+    def _spawn_chaos_profile(self, cycle_id: int) -> None:
+        civs = self.db.list_civilizations()
+        target_global = random.random() < 0.5
+        civ = None if target_global else (random.choice(civs) if civs else None)
+        archetypes = ["Disruptor", "Pacifier", "Fanatic", "Deconstructor", "Symbolic"]
+        archetype = random.choice(archetypes)
+        polarity = self._pick_chaos_polarity()
+        intensity = round(random.uniform(0.2, 0.6), 2)
+        duration = random.randint(2, 4)
+        bias = self._build_bias_vector(polarity)
+        civ_id = civ.id if civ else None
+        self.db.add_chaos_profile(
+            cycle_id,
+            cycle_id + duration,
+            civ_id,
+            archetype,
+            polarity,
+            bias,
+            intensity,
+        )
+        self.db.add_world_mark(
+            cycle_id,
+            civ_id,
+            "Ideological distortion",
+            f"Subtle divergence ({polarity})",
+        )
+        self.db.add_ai_log(
+            "chaos",
+            civ_id,
+            cycle_id,
+            "spawn",
+            (
+                f"Cycle {cycle_id}: chaos profile spawned. "
+                f"target={'global' if civ_id is None else f'CIV{civ_id}'} "
+                f"archetype={archetype} polarity={polarity} "
+                f"duration={duration} intensity={intensity:.2f} bias={bias}"
+            ),
+        )
+        if random.random() < 0.5:
+            self._spawn_cosmic_event(cycle_id, civ_id)
+
+    def _build_bias_vector(self, polarity: str) -> str:
+        if polarity == "stabilizing":
+            bias = {"stability": 0.05, "cohesion": 0.04, "inequality": -0.03}
+        elif polarity == "destabilizing":
+            bias = {"stability": -0.06, "inequality": 0.05, "eco_pressure": 0.03}
+        else:
+            bias = {"innovation": 0.05, "stability": -0.02, "cohesion": 0.02}
+        return json.dumps(bias)
+
+    def _pick_chaos_polarity(self) -> str:
+        seed = self.prompt_seeds.get("chaos", "").lower()
+        if "stabil" in seed or "calm" in seed or "pacif" in seed:
+            choices = ["stabilizing", "ambiguous", "stabilizing"]
+        elif "disrupt" in seed or "chaos" in seed or "radical" in seed:
+            choices = ["destabilizing", "ambiguous", "destabilizing"]
+        else:
+            choices = ["stabilizing", "destabilizing", "ambiguous"]
+        return random.choice(choices)
+
+    def _apply_chaos_bias(self, profile) -> None:
+        if profile.civ_id is None:
+            return
+        civs = {civ.id: civ for civ in self.db.list_civilizations()}
+        civ = civs.get(profile.civ_id)
+        if not civ:
+            return
+        try:
+            bias = json.loads(profile.bias_json)
+        except json.JSONDecodeError:
+            return
+        intensity = profile.intensity
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+        cohesion = clamp(civ.cohesion + float(bias.get("cohesion", 0.0)) * intensity)
+        inequality = clamp(civ.inequality + float(bias.get("inequality", 0.0)) * intensity)
+        eco = clamp(civ.eco_pressure + float(bias.get("eco_pressure", 0.0)) * intensity)
+        innovation = clamp(civ.innovation + float(bias.get("innovation", 0.0)) * intensity)
+        stability = clamp(civ.stability + float(bias.get("stability", 0.0)) * intensity)
+        self.db.update_civilization(
+            civ.id,
+            cohesion=cohesion,
+            inequality=inequality,
+            eco_pressure=eco,
+            innovation=innovation,
+            stability=stability,
+        )
+
+    def _spawn_cosmic_event(self, cycle_id: int, civ_id: Optional[int]) -> None:
+        options = [
+            ("comet", "A luminous comet seeds rare minerals across the system."),
+            ("supernova", "A distant supernova shakes belief systems and myths."),
+            ("impact", "A rogue impact fractures a moon, exposing new resources."),
+            ("aurora", "Planetary auroras ignite a new scientific obsession."),
+            ("ruins", "Ancient debris field hints at forgotten civilizations."),
+        ]
+        kind, detail = random.choice(options)
+        title = f"Cosmic anomaly: {kind}"
+        metadata = {}
+        if kind in ("comet", "impact"):
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 2,
+                    "civ": civ_id,
+                    "kind": "resource_boom",
+                    "delta": {"innovation": 0.05, "eco_pressure": 0.04},
+                }
+            ]
+            metadata["world_marks"] = [
+                {"civ": civ_id, "label": "New mineral frontier", "impact": detail}
+            ]
+        elif kind == "supernova":
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 1,
+                    "civ": civ_id,
+                    "kind": "doubt_wave",
+                    "delta": {"stability": -0.05, "cohesion": -0.03},
+                }
+            ]
+            metadata["world_marks"] = [
+                {"civ": civ_id, "label": "Mythic doubt", "impact": detail}
+            ]
+        elif kind == "aurora":
+            metadata["delayed_effects"] = [
+                {
+                    "cycle_delay": 1,
+                    "civ": civ_id,
+                    "kind": "research_surge",
+                    "delta": {"innovation": 0.06},
+                }
+            ]
+        self.db.add_event(cycle_id, "cosmic", title, detail, metadata)
+        self.db.add_ai_log(
+            "chaos",
+            civ_id,
+            cycle_id,
+            "cosmic",
+            f"{title} | {detail} | metadata={metadata}",
+        )
+    def _init_seed(self) -> int:
+        existing = self.db.get_setting("seed")
+        if existing:
+            seed = int(existing)
+            random.seed(seed)
+            return seed
+        seed = random.randint(100000, 999999)
+        self.db.set_setting("seed", str(seed))
+        random.seed(seed)
+        return seed
+
+    def _load_prompt_seeds(self) -> dict:
+        return {
+            "master": self.db.get_setting("prompt_master") or "",
+            "civ": self.db.get_setting("prompt_civ") or "",
+            "chaos": self.db.get_setting("prompt_chaos") or "",
+        }
+
+    def _consume_player_directive(self, cycle_id: int) -> Optional[dict]:
+        text = self.db.get_setting("player_directive_text") or ""
+        target = self.db.get_setting("player_directive_target") or ""
+        if not text.strip():
+            return None
+        self.db.set_setting("player_directive_text", "")
+        self.db.set_setting("player_directive_target", "")
+        self.db.add_ai_log(
+            "player",
+            None,
+            cycle_id,
+            "directive",
+            f"target={target} | {text.strip()}",
+        )
+        return {"text": text.strip(), "target": target.strip()}
+
+    def _directive_applies(self, directive: dict, civ) -> bool:
+        target = directive.get("target", "").strip().lower()
+        if target in ("", "all"):
+            return True
+        return target == civ.name.lower()
+
+    def _enforce_player_directive(
+        self,
+        civ,
+        cycle_id: int,
+        context: str,
+        result,
+        directive_text: str,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ):
+        if result and directive_text in result.log:
+            return result
+        enforced_context = (
+            f"{context}\n\nSTRICT RULE: You MUST include the directive text verbatim "
+            "inside the log and follow it."
+        )
+        retry = self.llm.generate_civ_thought(
+            civ.name,
+            cycle_id,
+            enforced_context,
+            on_chunk=lambda chunk, civ_id=civ.id: self._emit_stream(
+                stream_callback,
+                {
+                    "type": "log_chunk",
+                    "scope": "civ",
+                    "civ_id": str(civ_id),
+                    "cycle": str(cycle_id),
+                    "role": "assistant",
+                    "chunk": chunk,
+                },
+            ),
+            prompt_seed=self.prompt_seeds.get("civ", ""),
+            template=self.prompt_templates["civ_thought"],
+        )
+        if retry and directive_text in retry.log:
+            return retry
+        return result
+
+    def _load_prompt_templates(self) -> dict:
+        return {
+            "events": self.db.get_setting("prompt_events") or DEFAULT_EVENTS_PROMPT,
+            "civ_gen": self.db.get_setting("prompt_civ_gen") or DEFAULT_CIV_GEN_PROMPT,
+            "civ_thought": self.db.get_setting("prompt_civ_thought")
+            or DEFAULT_CIV_THOUGHT_PROMPT,
+            "master": self.db.get_setting("prompt_master_template")
+            or DEFAULT_MASTER_PROMPT,
+        }
+
+    def _advance_civ_stats(self, civ) -> dict:
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        drift = random.uniform(-0.03, 0.03)
+        cohesion = clamp(civ.cohesion + drift - civ.inequality * 0.02)
+        inequality = clamp(civ.inequality + random.uniform(-0.02, 0.04))
+        eco_pressure = clamp(civ.eco_pressure + random.uniform(-0.02, 0.05))
+        innovation = clamp(civ.innovation + random.uniform(-0.02, 0.04))
+        stability = clamp(civ.stability + (cohesion - inequality) * 0.02)
+
+        tech_stage = self._maybe_advance_stage(
+            civ.tech_stage, innovation, stability
+        )
+        memory_long = civ.memory_long or "Seeded culture, early myths forming."
+        return {
+            "cohesion": cohesion,
+            "inequality": inequality,
+            "eco_pressure": eco_pressure,
+            "innovation": innovation,
+            "stability": stability,
+            "tech_stage": tech_stage,
+            "memory_long": memory_long,
+        }
+
+    def _maybe_advance_stage(
+        self, stage: str, innovation: float, stability: float
+    ) -> str:
+        stages = [
+            "stone",
+            "bronze",
+            "iron",
+            "classical",
+            "industrial",
+            "atomic",
+            "space",
+            "interstellar",
+        ]
+        if stage not in stages:
+            return stage
+        idx = stages.index(stage)
+        if idx >= len(stages) - 1:
+            return stage
+        chance = 0.01 + innovation * 0.06 + stability * 0.03
+        if random.random() < chance:
+            return stages[idx + 1]
+        return stage
+
+
+def build_obituary_context(db_or_snapshot: Any) -> Dict[str, object]:
+    db = getattr(db_or_snapshot, "db", db_or_snapshot)
+    if not isinstance(db, Database):
+        raise TypeError("build_obituary_context expects a Database or Simulation")
+
+    end_cycle = db.get_latest_cycle_id()
+    civs = db.list_civilizations()
+    civ_entries = []
+    context_lines = [
+        "Universe obituary context (facts only):",
+        f"Universe ended at cycle {end_cycle}.",
+        "",
+    ]
+
+    def _clean(text: str) -> str:
+        return " ".join(text.split())
+
+    def _truncate(text: str, limit: int = 240) -> str:
+        text = _clean(text)
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
+
+    for civ in civs:
+        extinct_cycle = civ.extinct_cycle
+        end_label = str(extinct_cycle) if extinct_cycle is not None else "end"
+        duration = int(extinct_cycle or end_cycle)
+        marks = db.list_marks(civ.id)[:6]
+
+        logs = db.list_ai_logs("civ", int(civ.id), limit=200)
+        logs = [log for log in reversed(logs) if log.role == "assistant"]
+        early_logs = logs[:2]
+        late_logs = logs[-4:] if logs else []
+
+        def _format_logs(items: List) -> List[str]:
+            formatted = []
+            for log in items:
+                snippet = _truncate(log.message)
+                formatted.append(f"(C{log.cycle}) {snippet}")
+            return formatted
+
+        early = _format_logs(early_logs)
+        late = _format_logs(late_logs)
+
+        civ_entries.append(
+            {
+                "id": civ.id,
+                "name": civ.name,
+                "duration": duration,
+                "end": end_label,
+                "marks": marks,
+                "early_logs": early,
+                "late_logs": late,
+            }
+        )
+
+        context_lines.append(f"CIVILIZATION: {civ.name}")
+        context_lines.append(f"DURATION: {duration} cycles")
+        context_lines.append(f"END: {end_label}")
+        context_lines.append(f"MARKS: {', '.join(marks) if marks else 'none'}")
+        context_lines.append("EARLY LOGS:")
+        if early:
+            for line in early:
+                context_lines.append(f"- {line}")
+        else:
+            context_lines.append("- none")
+        context_lines.append("FINAL LOGS:")
+        if late:
+            for line in late:
+                context_lines.append(f"- {line}")
+        else:
+            context_lines.append("- none")
+        context_lines.append("")
+
+    return {"context": "\n".join(context_lines).strip(), "civs": civ_entries}
+
+    def _apply_breakthroughs(self, civ, stats: dict) -> dict:
+        if stats["tech_stage"] == civ.tech_stage:
+            return stats
+        if stats["tech_stage"] == "space" and civ.tech_stage in (
+            "stone",
+            "bronze",
+            "iron",
+            "classical",
+        ):
+            if random.random() > 0.02:
+                stats["tech_stage"] = civ.tech_stage
+        return stats
+
+    def _build_long_memory(self, civ, stats: dict, log: str) -> str:
+        core = (
+            f"Traits: coh={stats['cohesion']:.2f}, ineq={stats['inequality']:.2f}, "
+            f"eco={stats['eco_pressure']:.2f}, inn={stats['innovation']:.2f}, "
+            f"stab={stats['stability']:.2f}, stage={stats['tech_stage']}."
+        )
+        log_trim = log.replace("\n", " ")
+        if len(log_trim) > 180:
+            log_trim = log_trim[:177] + "..."
+        return f"{core} Canon: {log_trim}"
+
+    def _innovation_climate(self, civs) -> str:
+        if not civs:
+            return "dormant"
+        good_status = ("stable", "prosper", "golden", "unified", "calm")
+        for civ in civs:
+            if any(k in str(civ.status).lower() for k in good_status):
+                return "propitious"
+            last = self.db.list_ai_logs("civ", civ.id, limit=1)
+            if last and any(
+                k in last[0].message.lower()
+                for k in ("research", "science", "education", "infrastructure")
+            ):
+                return "propitious"
+        return "volatile"
+
+    def _valid_hex_color(self, value: str) -> bool:
+        if not value.startswith("#") or len(value) != 7:
+            return False
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            return False
+        return True
+
+    def _emit_stream(
+        self,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+        payload: Dict[str, str],
+    ) -> None:
+        if stream_callback:
+            stream_callback(payload)

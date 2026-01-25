@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -25,25 +26,8 @@ class CivSeed:
 class LLMResult:
     prompt: str
     response: str
-
-
-@dataclass
-class CivThought:
-    prompt: str
-    response: str
-    log: str
-    god: str
-    updates: Dict[str, str]
-
-
-@dataclass
-class MasterThought:
-    prompt: str
-    response: str
-    title: str
-    log: str
-    god: str
-    analysis: str
+    model: str
+    latency_ms: int
 
 
 class LLMClient:
@@ -65,12 +49,22 @@ class LLMClient:
             cycle=cycle,
             context=context,
         )
-        response = self._call_ollama_stream(prompt, None)
+        response, latency = self._call_ollama_stream(prompt, None)
         if response:
             parsed = self._parse_events_json(response)
             if parsed is not None:
-                return parsed, LLMResult(prompt=prompt, response=response)
-        return [], LLMResult(prompt=prompt, response=response)
+                return parsed, LLMResult(
+                    prompt=prompt,
+                    response=response,
+                    model=self.model,
+                    latency_ms=latency,
+                )
+        return [], LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
+        )
 
     def generate_civilizations(
         self,
@@ -78,18 +72,30 @@ class LLMClient:
         count: int,
         template: Optional[str] = None,
     ) -> Tuple[List[CivSeed], Optional[LLMResult]]:
+        if self.mode != "ollama":
+            return self._fallback_civs(count), None
         planets_list = "\n".join([f"- {name} ({hab:.2f})" for name, hab in planets])
         prompt = self._render_template(
             template,
             count=count,
             planets_list=planets_list,
         )
-        response = self._call_ollama_stream(prompt, None)
+        response, latency = self._call_ollama_stream(prompt, None)
         if response:
             parsed = self._parse_civ_json(response, count)
             if parsed:
-                return parsed, LLMResult(prompt=prompt, response=response)
-        return self._fallback_civs(count), LLMResult(prompt=prompt, response=response)
+                return parsed, LLMResult(
+                    prompt=prompt,
+                    response=response,
+                    model=self.model,
+                    latency_ms=latency,
+                )
+        return self._fallback_civs(count), LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
+        )
 
     def generate_civ_thought(
         self,
@@ -99,7 +105,9 @@ class LLMClient:
         on_chunk: Optional[Callable[[str], None]] = None,
         prompt_seed: str = "",
         template: Optional[str] = None,
-    ) -> Optional[CivThought]:
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
         prompt = self._render_template(
             template,
             civ_name=civ_name,
@@ -107,24 +115,14 @@ class LLMClient:
             context=context,
         )
         prompt = self._append_seed(prompt, prompt_seed)
-        response = self._call_ollama_stream(prompt, on_chunk)
+        response, latency = self._call_ollama_stream(prompt, on_chunk)
         if not response:
             return None
-        parsed = self._parse_civ_thought_json(response)
-        if not parsed:
-            return CivThought(
-                prompt=prompt,
-                response=response,
-                log=response,
-                god="No human note.",
-                updates={},
-            )
-        return CivThought(
+        return LLMResult(
             prompt=prompt,
             response=response,
-            log=parsed["log"],
-            god=parsed["god"],
-            updates=parsed["updates"],
+            model=self.model,
+            latency_ms=latency,
         )
 
     def generate_master_log(
@@ -134,33 +132,57 @@ class LLMClient:
         on_chunk: Optional[Callable[[str], None]] = None,
         prompt_seed: str = "",
         template: Optional[str] = None,
-    ) -> Optional[MasterThought]:
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
         prompt = self._render_template(
             template,
             cycle=cycle,
             context=context,
         )
         prompt = self._append_seed(prompt, prompt_seed)
-        response = self._call_ollama_stream(prompt, on_chunk)
+        response, latency = self._call_ollama_stream(prompt, on_chunk)
         if not response:
             return None
-        parsed = self._parse_master_json(response)
-        if not parsed:
-            return MasterThought(
-                prompt=prompt,
-                response=response,
-                title=f"Cycle {cycle}",
-                log=response,
-                god="No human note.",
-                analysis="No analysis.",
-            )
-        return MasterThought(
+        return LLMResult(
             prompt=prompt,
             response=response,
-            title=parsed["title"],
-            log=parsed["log"],
-            god=parsed["god"],
-            analysis=parsed["analysis"],
+            model=self.model,
+            latency_ms=latency,
+        )
+
+    def generate_master_repair(
+        self,
+        prompt: str,
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
+        response, latency = self._call_ollama_stream(prompt, None)
+        if not response:
+            return None
+        return LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
+        )
+
+    def generate_obituaries(
+        self,
+        context: str,
+        template: Optional[str] = None,
+    ) -> Optional[LLMResult]:
+        if self.mode != "ollama":
+            return None
+        prompt = self._render_template(template, context=context)
+        response, latency = self._call_ollama_stream(prompt, None)
+        if not response:
+            return None
+        return LLMResult(
+            prompt=prompt,
+            response=response,
+            model=self.model,
+            latency_ms=latency,
         )
 
     def _generate_stub(self, cycle: int) -> List[GeneratedEvent]:
@@ -184,9 +206,11 @@ class LLMClient:
 
     def _call_ollama_stream(
         self, prompt: str, on_chunk: Optional[Callable[[str], None]]
-    ) -> str:
-        if self.mode == "stub":
-            return ""
+    ) -> Tuple[str, int]:
+        if self.mode != "ollama":
+            raise RuntimeError("LLM call blocked: LLM disabled")
+        start = time.monotonic()
+        max_duration = int(os.environ.get("OLLAMA_CALL_TIMEOUT", "240"))
         data = json.dumps(
             {"model": self.model, "prompt": prompt, "stream": True}
         ).encode("utf-8")
@@ -200,6 +224,8 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=45) as resp:
                 for raw in resp:
+                    if time.monotonic() - start > max_duration:
+                        break
                     if not raw:
                         continue
                     try:
@@ -214,8 +240,10 @@ class LLMClient:
                     if payload.get("done") is True:
                         break
         except (urllib.error.URLError, TimeoutError):
-            return ""
-        return "".join(full).strip()
+            latency = int((time.monotonic() - start) * 1000)
+            return "", latency
+        latency = int((time.monotonic() - start) * 1000)
+        return "".join(full).strip(), latency
 
     def healthcheck(self) -> bool:
         if self.mode == "stub":
@@ -252,8 +280,10 @@ class LLMClient:
             if cleaned.startswith("```"):
                 cleaned = cleaned.strip("`")
             data = json.loads(cleaned)
+            if isinstance(data, dict):
+                data = data.get("civilizations") or data.get("civs")
             if not isinstance(data, list):
-                return None
+                return self._parse_civ_text(raw, count)
             civs = []
             for item in data[:count]:
                 if not isinstance(item, dict):
@@ -266,7 +296,66 @@ class LLMClient:
                 return civs
             return None
         except json.JSONDecodeError:
-            return None
+            # Fallback: try to extract a JSON array from mixed output.
+            start = raw.find("[")
+            end = raw.rfind("]")
+            if start == -1 or end == -1 or end <= start:
+                return self._parse_civ_text(raw, count)
+            try:
+                data = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                return self._parse_civ_text(raw, count)
+            if isinstance(data, dict):
+                data = data.get("civilizations") or data.get("civs")
+            if not isinstance(data, list):
+                return self._parse_civ_text(raw, count)
+            civs = []
+            for item in data[:count]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip() or "Unnamed"
+                color = str(item.get("color", "")).strip() or self._rand_color()
+                summary = str(item.get("summary", "")).strip() or "No summary."
+                civs.append(CivSeed(name=name, color=color, summary=summary))
+            return civs if civs else None
+
+    def _parse_civ_text(self, raw: str, count: int) -> Optional[List[CivSeed]]:
+        lines = [line.strip() for line in raw.splitlines()]
+        civs: List[CivSeed] = []
+        current: Dict[str, str] = {}
+        def flush():
+            if not current:
+                return
+            name = current.get("NAME", "").strip()
+            color = current.get("COLOR", "").strip() or self._rand_color()
+            trait = current.get("TRAIT", "").strip()
+            flaw = current.get("FLAW", "").strip()
+            if not name:
+                return
+            summary_parts = []
+            if trait:
+                summary_parts.append(f"Trait: {trait}")
+            if flaw:
+                summary_parts.append(f"Flaw: {flaw}")
+            summary = " | ".join(summary_parts) if summary_parts else "No summary."
+            civs.append(CivSeed(name=name, color=color, summary=summary))
+            current.clear()
+
+        for line in lines:
+            if not line:
+                flush()
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip().upper()
+                if key in ("NAME", "COLOR", "TRAIT", "FLAW"):
+                    current[key] = value.strip()
+                    if key == "NAME" and len(civs) >= count:
+                        break
+            else:
+                continue
+        flush()
+        return civs[:count] if civs else None
 
     def _parse_events_json(self, raw: str) -> Optional[List[GeneratedEvent]]:
         try:

@@ -23,3 +23,11 @@ data/*.txt
 
 # Logs
 *.log
+
+# builds
+build/
+dist/
+*.egg
+.eggs/
+pip-wheel-metadata/
+

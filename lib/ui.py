@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import datetime as dt
@@ -6,10 +7,12 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
+from typing import List, Optional, Tuple
 
-from db import Event
-from sim import Simulation
-from ui_tabs import UITabsMixin
+from lib.db import Event
+from lib.sim import Simulation, build_obituary_context
+from prompts.prompt_design_v4 import OBITUARY_PROMPT
+from lib.ui_tabs import UITabsMixin
 
 
 class AppUI(UITabsMixin, tk.Frame):
@@ -47,6 +50,10 @@ class AppUI(UITabsMixin, tk.Frame):
         self._stop = False
         self._worker_thread = None
         self._layout_set = False
+        self._obituary_window = None
+        self._obituary_text = None
+        self._obituary_pending = False
+        self._obituary_blocks = []
         self._build()
         self._refresh_events()
         self._refresh_universe()
@@ -147,6 +154,52 @@ class AppUI(UITabsMixin, tk.Frame):
         self.canvas = tk.Canvas(
             map_frame, background=self.theme["bg"], highlightthickness=0
         )
+        overlay_controls = tk.Frame(map_frame, bg=self.theme["bg"])
+        overlay_controls.pack(fill="x", padx=8, pady=(6, 0))
+        self.show_missions = tk.BooleanVar(value=True)
+        self.show_routes = tk.BooleanVar(value=True)
+        self.show_beacons = tk.BooleanVar(value=True)
+        self.filter_selected_civ = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show missions",
+            variable=self.show_missions,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show routes",
+            variable=self.show_routes,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Show beacons",
+            variable=self.show_beacons,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left", padx=(0, 8))
+        tk.Checkbutton(
+            overlay_controls,
+            text="Only selected civ",
+            variable=self.filter_selected_civ,
+            command=self._draw_map_overlay,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._on_canvas_click)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
@@ -220,11 +273,30 @@ class AppUI(UITabsMixin, tk.Frame):
         self.info_tabs.add(self.world_tab, text="World")
 
         self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
-        self.info_tabs.add(self.chaos_tab, text="Chaos")
+        self.info_tabs.add(self.chaos_tab, text="Rules")
 
+        self.player_tab = tk.Frame(self.info_tabs, bg=self.theme["panel_alt"])
+        self.info_tabs.add(self.player_tab, text="Player")
 
-        player_frame = tk.Frame(right, bg=self.theme["panel_alt"])
-        player_frame.pack(fill="x", pady=(0, 6))
+        self.cycle_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.cycle_tab, text="Cycles")
+
+        self.missions_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.missions_tab, text="Missions")
+
+        self.errors_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.errors_tab, text="Errors")
+
+        self.civ_tabs = ttk.Notebook(right)
+        self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
+
+        player_row = tk.Frame(self.player_tab, bg=self.theme["panel_alt"])
+        player_row.pack(fill="both", expand=True, padx=8, pady=8)
+        player_row.columnconfigure(0, weight=1)
+        player_row.columnconfigure(1, weight=1)
+
+        player_frame = tk.Frame(player_row, bg=self.theme["panel_alt"])
+        player_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         tk.Label(
             player_frame,
             text="PLAYER DIRECTIVE (next cycle)",
@@ -234,7 +306,7 @@ class AppUI(UITabsMixin, tk.Frame):
         ).pack(anchor="w", padx=8, pady=(6, 2))
         self.player_text = tk.Text(
             player_frame,
-            height=2,
+            height=3,
             wrap="word",
             bg=self.theme["panel"],
             fg=self.theme["text"],
@@ -256,13 +328,50 @@ class AppUI(UITabsMixin, tk.Frame):
             highlightbackground=self.theme["panel"],
         ).pack(side="left", padx=6)
 
-        self.civ_tabs = ttk.Notebook(right)
-        self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
+        command_frame = tk.Frame(player_row, bg=self.theme["panel_alt"])
+        command_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        tk.Label(
+            command_frame,
+            text="PLAYER COMMAND",
+            font=("Consolas", 9, "bold"),
+            bg=self.theme["panel_alt"],
+            fg=self.theme["accent_alt"],
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+        cmd_row = tk.Frame(command_frame, bg=self.theme["panel_alt"])
+        cmd_row.pack(fill="x", padx=8, pady=(0, 6))
+        self.command_type = ttk.Combobox(
+            cmd_row,
+            values=["END_UNIVERSE", "KILL_CIV", "FORCE_EVENT", "SET_GLOBAL_MARK"],
+            state="readonly",
+            width=18,
+        )
+        self.command_type.pack(side="left")
+        self.command_type.set("END_UNIVERSE")
+        self.command_target = ttk.Combobox(cmd_row, values=[], state="readonly", width=18)
+        self.command_target.pack(side="left", padx=6)
+        self.command_arg = tk.Entry(
+            cmd_row,
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+            insertbackground=self.theme["accent"],
+            width=24,
+        )
+        self.command_arg.pack(side="left", padx=6)
+        tk.Button(
+            cmd_row,
+            text="Queue",
+            command=self._queue_player_command,
+            bg=self.theme["panel"],
+            fg=self.theme["accent"],
+            activebackground=self.theme["accent"],
+            activeforeground=self.theme["bg"],
+            highlightbackground=self.theme["panel"],
+        ).pack(side="left")
 
         events_pane = tk.PanedWindow(
-            right, orient="horizontal", sashrelief="raised", bg=self.theme["bg"]
+            self.cycle_tab, orient="horizontal", sashrelief="raised", bg=self.theme["bg"]
         )
-        events_pane.pack(fill="both", expand=True, pady=(8, 0))
+        events_pane.pack(fill="both", expand=True, padx=8, pady=8)
 
         events_left = tk.Frame(events_pane, bg=self.theme["bg"])
         events_right = tk.Frame(events_pane, bg=self.theme["bg"])
@@ -320,8 +429,9 @@ class AppUI(UITabsMixin, tk.Frame):
         self._refresh_universe()
         latest = self.sim.db.get_latest_cycle_id()
         civ_count = len(self.sim.db.list_civilizations())
+        ruleset = getattr(self.sim, "ruleset_name", "harsh_realism")
         self.status_var.set(
-            f"Cycle {latest} | Events {len(self.events)} | Civs {civ_count}"
+            f"Cycle {latest} | Events {len(self.events)} | Civs {civ_count} | Ruleset {ruleset}"
         )
         if latest == 0 and self._needs_init_message:
             self.info_text.delete("1.0", tk.END)
@@ -369,13 +479,27 @@ class AppUI(UITabsMixin, tk.Frame):
         self._worker_thread.start()
 
     def _run_loop(self) -> None:
+        def _sleep_with_stop(seconds: float) -> None:
+            end = time.time() + seconds
+            while time.time() < end:
+                if self._stop:
+                    return
+                time.sleep(0.1)
+
         while not self._stop:
             if self.is_running:
+                if self.sim.is_ended():
+                    self.is_running = False
+                    self.queue.put({"type": "universe_ended"})
+                    self._stop = True
+                    break
                 self.sim.run_cycle_stream(self._enqueue_stream)
                 self.queue.put({"type": "cycle_complete"})
-                time.sleep(self.cycle_interval_ms / 1000.0)
+                if self._stop:
+                    break
+                _sleep_with_stop(self.cycle_interval_ms / 1000.0)
             else:
-                time.sleep(0.2)
+                _sleep_with_stop(0.2)
 
     def _enqueue_stream(self, payload) -> None:
         self.queue.put(payload)
@@ -391,6 +515,12 @@ class AppUI(UITabsMixin, tk.Frame):
             if payload.get("type") == "cycle_complete":
                 self._refresh_events()
                 self._refresh_civ_tabs()
+                continue
+            if payload.get("type") == "universe_ended":
+                self._handle_universe_end()
+                continue
+            if payload.get("type") == "obituaries_ready":
+                self._on_obituaries_ready(payload)
                 continue
             self._handle_log_stream(payload)
         if handled:
@@ -411,7 +541,7 @@ class AppUI(UITabsMixin, tk.Frame):
             for planet in planets:
                 civ = civ_planets.get(planet.id)
                 if civ:
-                    color = civ.color
+                    color = "#444444" if getattr(civ, "extinct", 0) else civ.color
                     self._civ_systems[civ.id] = system.id
                     break
             system_colors[system.id] = color
@@ -450,6 +580,7 @@ class AppUI(UITabsMixin, tk.Frame):
             )
             self._system_items[item] = system.id
         self._draw_hud()
+        self._draw_map_overlay()
 
     def _handle_log_stream(self, payload) -> None:
         """Route streaming chunks to the correct text widget."""
@@ -499,6 +630,168 @@ class AppUI(UITabsMixin, tk.Frame):
             if scope == "civ" and civ_id:
                 self._pulse_civ(int(civ_id))
 
+    def _handle_universe_end(self) -> None:
+        if self._obituary_pending:
+            return
+        self._obituary_pending = True
+        self.status_var.set("Universe ended: generating obituaries.")
+        root = self.winfo_toplevel()
+        root.withdraw()
+        self.show_obituaries_window(
+            [
+                "The universe cooled.\n\n"
+                "No signals remain.\n\n"
+                "Once, there were civilizations here.\n"
+                "They may have met each other.\n"
+                "They may have reached the stars.\n"
+                "They endured, briefly.\n\n"
+                "Please wait, history being extracted from the ashes of the civilizations..."
+            ]
+        )
+        threading.Thread(target=self._generate_obituaries, daemon=True).start()
+
+    def _generate_obituaries(self) -> None:
+        civ_entries = []
+        try:
+            data = build_obituary_context(self.sim.db)
+            civ_entries = data.get("civs", [])
+            context = str(data.get("context", ""))
+            result = self.sim.llm.generate_obituaries(
+                context,
+                template=OBITUARY_PROMPT,
+            )
+            raw = result.response.strip() if result and result.response else ""
+            blocks = self._parse_obituary_blocks(raw) if raw else None
+            if not blocks and raw:
+                blocks = [raw]
+            if not blocks:
+                blocks = self._fallback_obituaries(civ_entries)
+        except Exception:
+            blocks = self._fallback_obituaries(civ_entries) if civ_entries else [
+                "No obituary data available."
+            ]
+        self.queue.put({"type": "obituaries_ready", "blocks": blocks})
+
+    def _on_obituaries_ready(self, payload) -> None:
+        blocks = payload.get("blocks") or []
+        self._obituary_blocks = list(blocks)
+        self.show_obituaries_window(blocks)
+
+    def _parse_obituary_blocks(self, raw: str) -> Optional[List[str]]:
+        if not raw.strip():
+            return None
+        blocks = []
+        current = []
+        for line in raw.splitlines():
+            if line.startswith("CIV:"):
+                if current:
+                    blocks.append("\n".join(current).strip())
+                    current = []
+                current.append(line.rstrip())
+                continue
+            if current:
+                current.append(line.rstrip())
+        if current:
+            blocks.append("\n".join(current).strip())
+        return blocks or None
+
+    def _fallback_obituaries(self, civ_entries: List[dict]) -> List[str]:
+        blocks = []
+        for civ in civ_entries:
+            name = civ.get("name", "Unknown")
+            duration = civ.get("duration", 0)
+            end = civ.get("end", "end")
+            marks = civ.get("marks", [])
+            early_logs = civ.get("early_logs", [])
+            late_logs = civ.get("late_logs", [])
+            if end == "end":
+                end_sentence = "survived until the end of the universe."
+            else:
+                end_sentence = f"ended at cycle {end}."
+            sentences = [
+                f"{name} persisted for {duration} cycles and {end_sentence}",
+                f"Final marks: {', '.join(marks) if marks else 'none recorded'}.",
+            ]
+            if early_logs:
+                sentences.append(f"Early records mention: \"{early_logs[0]}\".")
+            else:
+                sentences.append("Early records are missing.")
+            if late_logs:
+                sentences.append(f"Later records note: \"{late_logs[-1]}\".")
+            else:
+                sentences.append("Late records are missing.")
+            header = f"CIV: {name} | DURATION: {duration} cycles | END: {end}"
+            blocks.append(f"{header}\n{' '.join(sentences)}")
+        return blocks
+
+    def show_obituaries_window(self, text_blocks: List[str]) -> None:
+        root = self.winfo_toplevel()
+        if not self._obituary_window or not self._obituary_window.winfo_exists():
+            win = tk.Toplevel(root)
+            win.title("And this was Transcendence")
+            win.geometry("900x650")
+            win.configure(bg=self.theme["bg"])
+            header = tk.Label(
+                win,
+                text="And this was Transcendence",
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+                font=("Consolas", 14, "bold"),
+            )
+            header.pack(pady=(12, 4))
+            frame = tk.Frame(win, bg=self.theme["bg"])
+            frame.pack(fill="both", expand=True, padx=12, pady=12)
+            scrollbar = tk.Scrollbar(frame)
+            scrollbar.pack(side="right", fill="y")
+            text = tk.Text(
+                frame,
+                wrap="word",
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                insertbackground=self.theme["text"],
+                font=("Consolas", 11),
+                yscrollcommand=scrollbar.set,
+            )
+            text.pack(fill="both", expand=True)
+            scrollbar.config(command=text.yview)
+            actions = tk.Frame(win, bg=self.theme["bg"])
+            actions.pack(fill="x", padx=12, pady=(0, 12))
+            quit_btn = tk.Button(
+                actions,
+                text="Quit",
+                command=self._quit_from_obituaries,
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                activebackground=self.theme["panel"],
+                activeforeground=self.theme["text"],
+                relief="flat",
+                padx=12,
+                pady=6,
+            )
+            quit_btn.pack(side="right")
+            win.protocol("WM_DELETE_WINDOW", root.destroy)
+            self._obituary_window = win
+            self._obituary_text = text
+        text = self._obituary_text
+        if not text:
+            return
+        text.configure(state="normal")
+        text.delete("1.0", tk.END)
+        content = "\n\n".join(block.strip() for block in text_blocks if block).strip()
+        text.insert(tk.END, content or "No obituaries available.")
+        text.configure(state="disabled")
+
+    def _quit_from_obituaries(self) -> None:
+        try:
+            self._export_snapshot()
+            self.sim.db.set_setting(
+                "last_cycle", str(self.sim.db.get_latest_cycle_id())
+            )
+            self.sim.db.close()
+        except Exception:
+            pass
+        self.winfo_toplevel().destroy()
+
     def _on_canvas_resize(self, _event: tk.Event) -> None:
         self._seed_starfield()
         self._refresh_universe()
@@ -516,35 +809,27 @@ class AppUI(UITabsMixin, tk.Frame):
         self._show_system_info(system_id)
 
     def _build_comm_links(self, events):
-        systems = self.sim.db.list_systems()
-        if len(systems) < 2:
-            return []
         links = []
         kinds = {"contact", "conflict", "alliance", "trade", "war"}
         for event in events[:12]:
             if event.kind not in kinds:
                 continue
-            a = event.id % len(systems)
-            b = (event.id * 7 + 3) % len(systems)
-            if a == b:
-                b = (b + 1) % len(systems)
-            links.append((systems[a].id, systems[b].id, event.kind))
+            pair = self._event_link_systems(event)
+            if not pair:
+                continue
+            links.append((pair[0], pair[1], event.kind))
         return links
 
     def _build_persistent_links(self, events):
-        systems = self.sim.db.list_systems()
-        if len(systems) < 2:
-            return []
         links = {}
         kinds = {"alliance", "trade", "conflict", "war"}
         for event in events:
             if event.kind not in kinds:
                 continue
-            a = event.id % len(systems)
-            b = (event.id * 7 + 3) % len(systems)
-            if a == b:
-                b = (b + 1) % len(systems)
-            key = tuple(sorted((systems[a].id, systems[b].id)))
+            pair = self._event_link_systems(event)
+            if not pair:
+                continue
+            key = tuple(sorted(pair))
             if key not in links:
                 links[key] = event.kind
         return [(key[0], key[1], kind) for key, kind in links.items()]
@@ -554,9 +839,10 @@ class AppUI(UITabsMixin, tk.Frame):
         color = self.theme["accent"]
         for event in events[:6]:
             if event.kind in ("war", "conflict"):
-                alert = f"Alert: {event.kind.upper()}"
-                color = self.theme["danger"]
-                break
+                if self._event_link_systems(event):
+                    alert = f"Alert: {event.kind.upper()}"
+                    color = self.theme["danger"]
+                    break
             if event.kind == "anomaly":
                 alert = "Alert: ANOMALY DETECTED"
                 color = self.theme["accent_alt"]
@@ -567,6 +853,44 @@ class AppUI(UITabsMixin, tk.Frame):
                 break
         self._alert_text = alert
         self._alert_color = color
+
+    def _event_link_systems(self, event) -> Optional[Tuple[int, int]]:
+        meta = event.metadata if isinstance(event.metadata, dict) else {}
+        system_ids = meta.get("system_ids") or meta.get("systems")
+        if isinstance(system_ids, (list, tuple)) and len(system_ids) >= 2:
+            try:
+                a = int(system_ids[0])
+                b = int(system_ids[1])
+            except (TypeError, ValueError):
+                return None
+            if a != b:
+                return (a, b)
+            return None
+        civ_ids = meta.get("civ_ids") or meta.get("civs") or meta.get("participants")
+        if isinstance(civ_ids, (list, tuple)) and len(civ_ids) >= 2:
+            try:
+                civ_a = int(civ_ids[0])
+                civ_b = int(civ_ids[1])
+            except (TypeError, ValueError):
+                return None
+            a = self._civ_systems.get(civ_a)
+            b = self._civ_systems.get(civ_b)
+            if a and b and a != b:
+                return (a, b)
+        return None
+
+    def _event_target_system(self, event) -> Optional[int]:
+        meta = event.metadata if isinstance(event.metadata, dict) else {}
+        if meta.get("scope") != "civ":
+            return None
+        target = meta.get("target")
+        if target is None:
+            return None
+        try:
+            civ_id = int(target)
+        except (TypeError, ValueError):
+            return None
+        return self._civ_systems.get(civ_id)
 
     def _draw_comm_links(self, systems) -> None:
         if not self._comm_links:
@@ -670,6 +994,146 @@ class AppUI(UITabsMixin, tk.Frame):
             font=("Consolas", 10, "bold"),
         )
 
+    def _draw_map_overlay(self) -> None:
+        self.canvas.delete("overlay")
+        systems = self.sim.db.list_systems()
+        if not systems or not self._system_positions:
+            return
+        name_to_id = {system.name: system.id for system in systems}
+        civs = self.sim.db.list_civilizations()
+        civ_colors = {str(civ.id): civ.color for civ in civs}
+        selected_civ = None
+        if self.filter_selected_civ.get() and self.selected_system_id:
+            for civ in civs:
+                if self._civ_systems.get(civ.id) == self.selected_system_id:
+                    selected_civ = str(civ.id)
+                    break
+
+        beacons = self._load_json_setting("global_beacons", [])
+        if self.show_beacons.get():
+            for beacon in beacons:
+                if not isinstance(beacon, dict):
+                    continue
+                owner = str(beacon.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                system_name = beacon.get("system")
+                if system_name not in name_to_id:
+                    continue
+                system_id = name_to_id[system_name]
+                pos = self._system_positions.get(system_id)
+                if not pos:
+                    continue
+                strength = float(beacon.get("strength", 0.5))
+                radius = 10 + int(strength * 8)
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                x, y = pos
+                self.canvas.create_oval(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    outline=color,
+                    width=2,
+                    tags="overlay",
+                )
+
+        routes = []
+        missions = []
+        for civ in civs:
+            civ_id = str(civ.id)
+            if selected_civ and civ_id != selected_civ:
+                continue
+            routes.extend(self._load_json_setting(f"civ_routes_{civ.id}", []))
+            missions.extend(self._load_json_setting(f"civ_missions_{civ.id}", []))
+
+        if self.show_routes.get():
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                owner = str(route.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                from_name = route.get("from_system")
+                to_name = route.get("to_system")
+                if from_name not in name_to_id or to_name not in name_to_id:
+                    continue
+                a = self._system_positions.get(name_to_id[from_name])
+                b = self._system_positions.get(name_to_id[to_name])
+                if not a or not b:
+                    continue
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                self.canvas.create_line(
+                    a[0],
+                    a[1],
+                    b[0],
+                    b[1],
+                    fill=color,
+                    width=2,
+                    tags="overlay",
+                )
+
+        if self.show_missions.get():
+            for mission in missions:
+                if not isinstance(mission, dict):
+                    continue
+                if mission.get("status") != "enroute":
+                    continue
+                owner = str(mission.get("owner"))
+                if selected_civ and owner != selected_civ:
+                    continue
+                from_name = mission.get("from_system")
+                to_name = mission.get("to_system")
+                if from_name not in name_to_id or to_name not in name_to_id:
+                    continue
+                a = self._system_positions.get(name_to_id[from_name])
+                b = self._system_positions.get(name_to_id[to_name])
+                if not a or not b:
+                    continue
+                color = civ_colors.get(owner) or self._fallback_civ_color(owner)
+                self.canvas.create_line(
+                    a[0],
+                    a[1],
+                    b[0],
+                    b[1],
+                    fill=color,
+                    width=1,
+                    dash=(4, 3),
+                    tags="overlay",
+                )
+                eta = mission.get("eta")
+                if eta is not None:
+                    mx = int((a[0] + b[0]) / 2)
+                    my = int((a[1] + b[1]) / 2)
+                    self.canvas.create_text(
+                        mx,
+                        my - 8,
+                        text=f"ETA {eta}",
+                        fill=self.theme["muted"],
+                        font=("Consolas", 8),
+                        tags="overlay",
+                    )
+
+    def _load_json_setting(self, key: str, default):
+        raw = self.sim.db.get_setting(key)
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return default
+        return data if isinstance(data, type(default)) else default
+
+    def _fallback_civ_color(self, civ_id: str) -> str:
+        try:
+            seed = int(civ_id)
+        except (TypeError, ValueError):
+            seed = sum(ord(ch) for ch in str(civ_id))
+        r = 80 + (seed * 53) % 150
+        g = 80 + (seed * 97) % 150
+        b = 80 + (seed * 193) % 150
+        return f"#{r:02x}{g:02x}{b:02x}"
+
     def _apply_theme(self) -> None:
         self.configure(bg=self.theme["bg"])
         style = ttk.Style()
@@ -747,6 +1211,12 @@ class AppUI(UITabsMixin, tk.Frame):
         filename = f"{timestamp}_{game_name}_cycle{cycle}.txt"
         path = os.path.join(base_dir, filename)
         content = self.sim.db.export_snapshot()
+        if self._obituary_blocks:
+            obituary_text = "\n\n".join(
+                block.strip() for block in self._obituary_blocks if block
+            ).strip()
+            if obituary_text:
+                content = f"{content}\n\n== OBITUARIES ==\n\n{obituary_text}\n"
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -763,6 +1233,7 @@ class AppUI(UITabsMixin, tk.Frame):
             self.after(100, self._wait_for_worker)
             return
         try:
+            self._export_snapshot()
             self.sim.db.set_setting(
                 "last_cycle", str(self.sim.db.get_latest_cycle_id())
             )
@@ -936,11 +1407,10 @@ class AppUI(UITabsMixin, tk.Frame):
         self._pulse_at(pos[0], pos[1], self.theme["accent_alt"])
 
     def _pulse_from_events(self, events, count: int) -> None:
-        systems = list(self._system_positions.keys())
-        if not systems:
-            return
         for event in events[:count]:
-            system_id = systems[event.id % len(systems)]
+            system_id = self._event_target_system(event)
+            if not system_id:
+                continue
             pos = self._system_positions.get(system_id)
             if pos:
                 color = (
