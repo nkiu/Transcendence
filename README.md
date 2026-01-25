@@ -49,6 +49,9 @@ You can also open the standalone DB viewer:
 python db_viewer.py path/to/sim.db
 ```
 
+The engine writes its version to SQLite (`run_settings.engine_version`) so you can flag
+save files created by incompatible builds. The DB viewer shows this value in the header.
+
 ## Prompts (editable per save)
 
 All key prompts are editable from the **Prompts** tab on the start screen:
