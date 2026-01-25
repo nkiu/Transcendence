@@ -24,6 +24,8 @@ class DBViewer(tk.Tk):
         self.table_columns: Dict[str, List[str]] = {}
         self.civ_cache: Dict[int, Dict[str, object]] = {}
         self.cycles_cache: List[int] = []
+        self.cycle_name_cache: Dict[int, str] = {}
+        self.mission_cycle_cache: Dict[str, set] = {}
 
         self._build_ui()
         if db_path:
@@ -154,6 +156,7 @@ class DBViewer(tk.Tk):
             self.conn.row_factory = sqlite3.Row
             self.db_path = path
             self.db_label.configure(text=path)
+            self.mission_cycle_cache.clear()
             self._introspect_schema()
             self._populate_civs()
             self._populate_cycles()
@@ -225,6 +228,7 @@ class DBViewer(tk.Tk):
         for row in civs:
             self.civ_cache[int(row[0])] = {"id": int(row[0]), "name": row[1]}
             entries.append(f"{row[0]}: {row[1]}")
+        entries.insert(0, "MASTER")
         self.civ_combo.configure(values=entries)
         if entries:
             self.civ_combo.set(entries[0])
@@ -234,6 +238,9 @@ class DBViewer(tk.Tk):
         self.cycles_cache = []
         if not self.conn:
             return
+        civ_id = self._selected_civ_id()
+        mission_cycles = self._mission_cycles_for(civ_id)
+        self.cycle_name_cache = self._load_cycle_names()
         table = self.mapping.get("cycle_records") or self.mapping.get("cycles")
         if not table:
             return
@@ -244,18 +251,27 @@ class DBViewer(tk.Tk):
         for row in rows:
             cycle = int(row[0])
             self.cycles_cache.append(cycle)
-            self.cycle_list.insert(tk.END, f"Cycle {cycle}")
+            name = self.cycle_name_cache.get(cycle, "")
+            label = f"Cycle {cycle}"
+            if name:
+                label = f"{label} — {name}"
+            if cycle in mission_cycles:
+                label = f"(M) {label}"
+            self.cycle_list.insert(tk.END, label)
 
     def _on_civ_selected(self, _event=None) -> None:
+        self._populate_cycles()
         self._refresh_for_selection()
 
     def _on_cycle_selected(self, _event=None) -> None:
         self._refresh_for_selection()
 
-    def _selected_civ_id(self) -> Optional[int]:
+    def _selected_civ_id(self) -> Optional[object]:
         raw = self.civ_combo.get()
         if not raw:
             return None
+        if raw.strip().upper() == "MASTER":
+            return "MASTER"
         try:
             return int(raw.split(":", 1)[0])
         except ValueError:
@@ -280,7 +296,10 @@ class DBViewer(tk.Tk):
         self._load_events(civ_id, cycle)
         self._load_narrative(civ_id, cycle)
 
-    def _load_stats(self, civ_id: int, cycle: int) -> None:
+    def _load_stats(self, civ_id: object, cycle: int) -> None:
+        if civ_id == "MASTER":
+            self._clear_stats()
+            return
         record = self._get_cycle_record(cycle)
         if not record:
             self._clear_stats()
@@ -321,7 +340,7 @@ class DBViewer(tk.Tk):
         self.raw_text.delete("1.0", tk.END)
         self.raw_text.insert(tk.END, json.dumps(civ_entry, indent=2))
 
-    def _load_events(self, civ_id: int, cycle: int) -> None:
+    def _load_events(self, civ_id: object, cycle: int) -> None:
         for item in self.events_tree.get_children():
             self.events_tree.delete(item)
         table = self.mapping.get("events")
@@ -338,14 +357,47 @@ class DBViewer(tk.Tk):
                 meta = json.loads(row[3])
             except json.JSONDecodeError:
                 meta = {}
-            target = str(meta.get("target", ""))
-            if target and target != str(civ_id):
-                continue
+            if civ_id != "MASTER":
+                target = str(meta.get("target", ""))
+                if target and target != str(civ_id):
+                    continue
             self.events_tree.insert("", "end", values=(row[0], row[1], row[2]))
 
-    def _load_narrative(self, civ_id: int, cycle: int) -> None:
+    def _load_narrative(self, civ_id: object, cycle: int) -> None:
         self.narrative_text.delete("1.0", tk.END)
         record = self._get_cycle_record(cycle)
+        if civ_id == "MASTER":
+            if record:
+                master = record.get("master", {})
+                text = (
+                    f"TITLE: {master.get('title', '')}\n"
+                    f"SUMMARY:\n{master.get('log_text', '')}\n\n"
+                    f"WORLD:\n{master.get('analysis_text', '')}\n\n"
+                    f"NOTES:\n{master.get('god_text', '')}\n"
+                )
+                self.narrative_text.insert(tk.END, text)
+                return
+            table = self.mapping.get("ai_logs")
+            if not table or not self.conn:
+                self.narrative_text.insert(tk.END, "No narrative stored")
+                return
+            cur = self.conn.cursor()
+            rows = cur.execute(
+                f"SELECT role, message FROM {table} WHERE scope='master' AND cycle=?",
+                (cycle,),
+            ).fetchall()
+            if not rows:
+                self.narrative_text.insert(tk.END, "No narrative stored")
+                return
+            parts = {row[0]: row[1] for row in rows}
+            title = self.cycle_name_cache.get(cycle, f"Cycle {cycle}")
+            text = (
+                f"TITLE: {title}\nSUMMARY:\n{parts.get('assistant', '')}\n\n"
+                f"WORLD:\n{parts.get('analysis', '')}\n\n"
+                f"NOTES:\n{parts.get('god', '')}\n"
+            )
+            self.narrative_text.insert(tk.END, text)
+            return
         if record:
             for civ in record.get("civilizations", []):
                 if str(civ.get("civ_id")) == str(civ_id):
@@ -410,6 +462,69 @@ class DBViewer(tk.Tk):
         for lbl in self.stats_labels.values():
             lbl.configure(text="—")
         self.raw_text.delete("1.0", tk.END)
+
+    def _load_cycle_names(self) -> Dict[int, str]:
+        names: Dict[int, str] = {}
+        if not self.conn:
+            return names
+        table = self.mapping.get("cycles")
+        if table:
+            cur = self.conn.cursor()
+            rows = cur.execute(f"SELECT id, summary FROM {table}").fetchall()
+            for row in rows:
+                if row[1]:
+                    names[int(row[0])] = str(row[1])
+        if not names and self.mapping.get("cycle_records"):
+            cur = self.conn.cursor()
+            rows = cur.execute(
+                f"SELECT cycle, record_json FROM {self.mapping['cycle_records']}"
+            ).fetchall()
+            for cycle, record_json in rows:
+                try:
+                    record = json.loads(record_json)
+                except json.JSONDecodeError:
+                    continue
+                title = record.get("master", {}).get("title")
+                if title:
+                    names[int(cycle)] = str(title)
+        return names
+
+    def _mission_cycles_for(self, civ_id: Optional[object]) -> set:
+        if civ_id is None or not self.conn:
+            return set()
+        key = str(civ_id)
+        if key in self.mission_cycle_cache:
+            return self.mission_cycle_cache[key]
+        cycles = set()
+        table = self.mapping.get("events")
+        if not table:
+            self.mission_cycle_cache[key] = cycles
+            return cycles
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            f"SELECT cycle, title, metadata_json FROM {table} "
+            "WHERE title LIKE '%MISSION%' "
+            "OR metadata_json LIKE '%MISSION%' "
+            "OR metadata_json LIKE '%INTERSTELLAR%'"
+        ).fetchall()
+        for cycle, title, meta_raw in rows:
+            event_id = ""
+            target = ""
+            try:
+                meta = json.loads(meta_raw)
+                event_id = str(meta.get("event_id", ""))
+                target = str(meta.get("target", ""))
+            except json.JSONDecodeError:
+                event_id = ""
+            if "MISSION_" not in event_id and "INTERSTELLAR" not in event_id:
+                if title and "MISSION" not in str(title).upper():
+                    continue
+            if civ_id != "MASTER":
+                if target and target != str(civ_id):
+                    continue
+            cycles.add(int(cycle))
+        self.mission_cycle_cache[key] = cycles
+        return cycles
 
     def _show_plots(self) -> None:
         civ_id = self._selected_civ_id()
