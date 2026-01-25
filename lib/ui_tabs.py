@@ -451,6 +451,44 @@ class UITabsMixin:
         for child in self.civ_overview.winfo_children():
             child.destroy()
         latest = self.sim.db.get_latest_cycle_id()
+        header = tk.Frame(self.civ_overview, bg=self.theme["panel_alt"])
+        header.pack(fill="x", pady=(0, 4))
+        tk.Label(
+            header,
+            text="CIV",
+            bg=self.theme["panel_alt"],
+            fg=self.theme["muted"],
+            font=("Consolas", 8, "bold"),
+            width=18,
+            anchor="w",
+        ).pack(side="left", padx=(6, 0))
+        tk.Label(
+            header,
+            text="Stage/Progress",
+            bg=self.theme["panel_alt"],
+            fg=self.theme["muted"],
+            font=("Consolas", 8, "bold"),
+            width=18,
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="Intent",
+            bg=self.theme["panel_alt"],
+            fg=self.theme["muted"],
+            font=("Consolas", 8, "bold"),
+            width=16,
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="Dynamics",
+            bg=self.theme["panel_alt"],
+            fg=self.theme["muted"],
+            font=("Consolas", 8, "bold"),
+            width=18,
+            anchor="w",
+        ).pack(side="left")
         for civ in civs:
             row = tk.Frame(self.civ_overview, bg=self.theme["panel_alt"])
             row.pack(fill="x", pady=2)
@@ -464,23 +502,60 @@ class UITabsMixin:
             dot.pack(side="left")
             fill = "#444444" if getattr(civ, "extinct", 0) else civ.color
             dot.create_oval(2, 2, 10, 10, fill=fill, outline="")
+            status = "EXTINCT" if getattr(civ, "extinct", 0) else civ.status
+            name = tk.Label(
+                row,
+                text=f"{civ.name} :: {status}",
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                font=("Consolas", 9),
+                width=18,
+                anchor="w",
+            )
+            name.pack(side="left", padx=(6, 0))
+            progress = self._get_civ_progress(civ.id)
+            stage = getattr(civ, "tech_stage", "") or "—"
+            stage_text = self._format_stage_progress(stage, progress)
+            tk.Label(
+                row,
+                text=stage_text.replace("Stage: ", "").replace("Progress: ", ""),
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                font=("Consolas", 9),
+                width=18,
+                anchor="w",
+            ).pack(side="left")
+            agenda = self._get_civ_token(civ.id, "civ_agenda") or "—"
+            stance = self._get_civ_token(civ.id, "civ_stance") or "—"
+            tk.Label(
+                row,
+                text=f"{agenda}/{stance}",
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                font=("Consolas", 9),
+                width=16,
+                anchor="w",
+            ).pack(side="left")
+            elite = self._format_percent(getattr(civ, "elite_power", None))
+            legit = self._format_percent(getattr(civ, "legitimacy", None))
+            extract = self._format_percent(getattr(civ, "extraction_rate", None))
+            tk.Label(
+                row,
+                text=f"E{elite} L{legit} X{extract}",
+                bg=self.theme["panel_alt"],
+                fg=self.theme["text"],
+                font=("Consolas", 9),
+                width=18,
+                anchor="w",
+            ).pack(side="left")
             spark = tk.Canvas(
                 row,
-                width=80,
+                width=70,
                 height=12,
                 bg=self.theme["panel_alt"],
                 highlightthickness=0,
             )
             spark.pack(side="right", padx=6)
-            status = "EXTINCT" if getattr(civ, "extinct", 0) else civ.status
-            label = tk.Label(
-                row,
-                text=f"{civ.name} :: {civ.level} :: {status}",
-                bg=self.theme["panel_alt"],
-                fg=self.theme["text"],
-                font=("Consolas", 9),
-            )
-            label.pack(side="left", padx=6)
             self._draw_sparkline(spark, civ.id, latest)
 
     def _refresh_player_targets(self, civs) -> None:
