@@ -1402,6 +1402,10 @@ class Simulation:
             f"extraction_rate={civ.stats.extraction_rate:.2f}"
         )
         lines.append(f"Stage: {civ.stage} (progress={civ.progress:.2f})")
+        crisis, severe = self.rules_engine._legitimacy_crisis_levels(civ)
+        if crisis:
+            label = "LEGITIMACY CRISIS (SEVERE)" if severe else "LEGITIMACY CRISIS"
+            lines.append(f"Crisis: {label}")
         lines.append(
             "Exploration: "
             f"reach={civ.reach} | known_systems={len(civ.known_systems)} | "
@@ -1742,6 +1746,10 @@ class Simulation:
                     "stats": civ.stats.as_dict(),
                     "stage": civ.stage,
                     "progress": civ.progress,
+                    "crisis": {
+                        "legitimacy": self.rules_engine._legitimacy_crisis_levels(civ)[0],
+                        "severe": self.rules_engine._legitimacy_crisis_levels(civ)[1],
+                    },
                     "world_marks": list(civ.marks),
                     "applied_events": applied,
                     "narrative": {

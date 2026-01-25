@@ -33,6 +33,7 @@ DEFAULT_CIV_THOUGHT_PROMPT = (
     "- Do not invent events. Only react to the 'applied_events' and the state given in the context.\n"
     "- You may rationalize or misunderstand, but you cannot deny concrete outcomes (famine, illness, violence).\n"
     "- If missions, beacons, or contact events appear in context, reference them directly.\n"
+    "- If CRISIS flags are present (e.g., legitimacy crisis), acknowledge unrest or coercion.\n"
     "- If food_security <= 0.10 or health <= 0.10: write shorter, fragmented sentences.\n"
     "- If cohesion <= 0.10 or stability <= 0.10: show confusion, fear, contradictions.\n"
     "- AGENDA must be exactly one of: SURVIVE, REFORM, EXPLORE, DOMINATE, WITHDRAW.\n"

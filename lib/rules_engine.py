@@ -428,9 +428,49 @@ class RulesEngine:
                 self._apply_event(collapse_event, civs, universe)
 
         self._apply_internal_drift(civs)
+        civ_events.extend(self._update_legitimacy_crisis(civs, universe))
         civ_events.extend(self._update_progress_and_stage(civs, universe))
 
         return civ_events, global_events, delayed_applied
+
+    def _update_legitimacy_crisis(
+        self, civs: List[CivilizationState], universe: UniverseState
+    ) -> List[AppliedEvent]:
+        events: List[AppliedEvent] = []
+        for civ in civs:
+            if not civ.alive:
+                continue
+            crisis, _severe = self._legitimacy_crisis_levels(civ)
+            has_mark = "LegitimacyCrisis" in civ.marks
+            if crisis and not has_mark:
+                onset = AppliedEvent(
+                    event_id="EVT_LEGITIMACY_CRISIS_ONSET",
+                    kind="politics",
+                    scope="civ",
+                    severity=2,
+                    target=civ.id,
+                    deltas={},
+                    add_marks=["LegitimacyCrisis"],
+                    remove_marks=[],
+                    delayed_effects=[],
+                )
+                events.append(onset)
+                self._apply_event(onset, civs, universe)
+            if not crisis and has_mark and civ.stats.legitimacy > 0.08:
+                recovery = AppliedEvent(
+                    event_id="EVT_LEGITIMACY_CRISIS_RECOVERY",
+                    kind="policy",
+                    scope="civ",
+                    severity=1,
+                    target=civ.id,
+                    deltas={},
+                    add_marks=[],
+                    remove_marks=["LegitimacyCrisis"],
+                    delayed_effects=[],
+                )
+                events.append(recovery)
+                self._apply_event(recovery, civs, universe)
+        return events
 
     def _update_missions(
         self, civs: List[CivilizationState], universe: UniverseState
@@ -552,6 +592,17 @@ class RulesEngine:
             if stats["legitimacy"] <= 0.30:
                 stats["cohesion"] = clamp(stats["cohesion"] - 0.01)
                 stats["stability"] = clamp(stats["stability"] - 0.01)
+            crisis, severe = self._legitimacy_crisis_levels(civ)
+            if crisis:
+                stats["eco_pressure"] = clamp(
+                    stats["eco_pressure"] + (0.015 if severe else 0.01)
+                )
+                stats["extraction_rate"] = clamp(
+                    stats["extraction_rate"] + (0.015 if severe else 0.01)
+                )
+                stats["innovation"] = clamp(
+                    stats["innovation"] - (0.01 if severe else 0.005)
+                )
             civ.stats = CivStats(**stats)
 
     def _passes_preconditions(
@@ -633,6 +684,7 @@ class RulesEngine:
             factor = self._agenda_weight_factor(event, civ)
             factor *= self._stance_weight_factor(event, civ)
             factor *= self._stage_weight_factor(event, civ, global_stage_bias)
+            factor *= self._legitimacy_crisis_weight_factor(event, civ)
             weight = max(float(base) * factor, 0.01)
             adjusted.append(weight)
         weights = adjusted
@@ -720,6 +772,30 @@ class RulesEngine:
                 factor *= 1.3
             return factor
         return 1.0
+
+    def _legitimacy_crisis_weight_factor(
+        self, event: EventDefinition, civ: Optional[CivilizationState]
+    ) -> float:
+        if civ is None:
+            return 1.0
+        crisis, _severe = self._legitimacy_crisis_levels(civ)
+        if not crisis:
+            return 1.0
+        crisis_ids = {
+            "EVT_GENERAL_STRIKE",
+            "EVT_MASS_UPRISING",
+            "EVT_REPRESSION_CAMPAIGN",
+            "EVT_SECESSION_ATTEMPT",
+            "EVT_EMERGENCY_REFORM",
+        }
+        factor = 1.0
+        if event.id in crisis_ids:
+            factor *= 1.5
+        if event.kind == "policy":
+            factor *= 1.2
+        if event.kind == "cosmic":
+            factor *= 0.85
+        return factor
 
     def _make_applied_event(
         self,
@@ -934,7 +1010,9 @@ class RulesEngine:
             stats = civ.stats.as_dict()
             for key, delta in event.deltas.items():
                 if key in stats:
-                    stats[key] = clamp(stats[key] + float(delta))
+                    stats[key] = clamp(
+                        stats[key] + self._adjust_crisis_delta(civ, key, float(delta))
+                    )
             civ.stats = CivStats(**stats)
             for mark in event.add_marks:
                 if mark not in civ.marks:
@@ -979,7 +1057,9 @@ class RulesEngine:
                 stats = civ.stats.as_dict()
                 for key, delta in effect.deltas.items():
                     if key in stats:
-                        stats[key] = clamp(stats[key] + float(delta))
+                        stats[key] = clamp(
+                            stats[key] + self._adjust_crisis_delta(civ, key, float(delta))
+                        )
                 civ.stats = CivStats(**stats)
                 for mark in effect.add_marks:
                     if effect.target == "global":
@@ -999,6 +1079,24 @@ class RulesEngine:
 
     def _cooldown_key(self, event_id: str, target: str) -> str:
         return f"{target}:{event_id}"
+
+    def _adjust_crisis_delta(
+        self, civ: CivilizationState, key: str, delta: float
+    ) -> float:
+        if delta >= 0:
+            return delta
+        if key not in ("stability", "cohesion", "health", "food_security"):
+            return delta
+        crisis, severe = self._legitimacy_crisis_levels(civ)
+        if not crisis:
+            return delta
+        multiplier = 1.60 if severe else 1.35
+        return delta * multiplier
+
+    def _legitimacy_crisis_levels(self, civ: CivilizationState) -> Tuple[bool, bool]:
+        crisis = civ.stats.legitimacy <= 0.05
+        severe = civ.stats.legitimacy <= 0.02
+        return crisis, severe
 
     def _register_contact(self, event: AppliedEvent, civs: List[CivilizationState]) -> None:
         civ = next((c for c in civs if c.id == event.target), None)

@@ -507,6 +507,99 @@
     "notes": "Contact escalates into raids."
   },
   {
+    "id": "EVT_GENERAL_STRIKE",
+    "kind": "society",
+    "scope": "civ",
+    "weight_base": 0.55,
+    "severity_range": [2,4],
+    "cooldown_cycles": 8,
+    "cannot_repeat_for": 8,
+    "preconditions": ["legitimacy <= 0.05", "stability <= 0.70"],
+    "effects": {
+      "deltas": {"stability": -0.06, "food_security": -0.04, "cohesion": -0.03},
+      "add_marks": ["GeneralStrike"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Work stoppage deepens instability during legitimacy crisis."
+  },
+  {
+    "id": "EVT_MASS_UPRISING",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.5,
+    "severity_range": [3,5],
+    "cooldown_cycles": 10,
+    "cannot_repeat_for": 10,
+    "preconditions": ["legitimacy <= 0.05", "stability <= 0.55"],
+    "effects": {
+      "deltas": {"stability": -0.10, "cohesion": -0.08, "health": -0.05},
+      "add_marks": ["MassUprising"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Popular uprising destabilizes the regime."
+  },
+  {
+    "id": "EVT_REPRESSION_CAMPAIGN",
+    "kind": "politics",
+    "scope": "civ",
+    "weight_base": 0.6,
+    "severity_range": [2,4],
+    "cooldown_cycles": 10,
+    "cannot_repeat_for": 10,
+    "preconditions": ["legitimacy <= 0.05"],
+    "effects": {
+      "deltas": {"stability": 0.05, "cohesion": -0.06, "inequality": 0.05, "legitimacy": -0.02},
+      "add_marks": ["Repression"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Short-term order with deepening legitimacy loss."
+  },
+  {
+    "id": "EVT_SECESSION_ATTEMPT",
+    "kind": "conflict",
+    "scope": "civ",
+    "weight_base": 0.45,
+    "severity_range": [3,5],
+    "cooldown_cycles": 12,
+    "cannot_repeat_for": 12,
+    "preconditions": ["legitimacy <= 0.05", "cohesion <= 0.55"],
+    "effects": {
+      "deltas": {"stability": -0.08, "cohesion": -0.06},
+      "add_marks": ["SecessionAttempt"],
+      "remove_marks": [],
+      "delayed_effects": [
+        {
+          "cycle_delay": 2,
+          "branch": {
+            "success": {"deltas": {"cohesion": -0.05, "inequality": 0.03}, "add_marks": ["FragmentedPolity"], "remove_marks": []},
+            "failure": {"deltas": {"stability": 0.03, "health": -0.03}, "add_marks": ["Suppressed"], "remove_marks": []}
+          }
+        }
+      ]
+    },
+    "notes": "Secession attempt splits the polity or is suppressed."
+  },
+  {
+    "id": "EVT_EMERGENCY_REFORM",
+    "kind": "policy",
+    "scope": "civ",
+    "weight_base": 0.4,
+    "severity_range": [2,4],
+    "cooldown_cycles": 14,
+    "cannot_repeat_for": 14,
+    "preconditions": ["legitimacy <= 0.08", "inequality >= 0.60", "stability >= 0.25"],
+    "effects": {
+      "deltas": {"inequality": -0.06, "legitimacy": 0.10, "stability": -0.03},
+      "add_marks": ["EmergencyReform"],
+      "remove_marks": [],
+      "delayed_effects": []
+    },
+    "notes": "Reform attempts restore legitimacy at a cost."
+  },
+  {
     "id": "EVT_RITUAL_RESOURCE_WASTE",
     "kind": "culture",
     "scope": "civ",

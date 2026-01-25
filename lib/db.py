@@ -1358,6 +1358,8 @@ class Database:
                 lines.append(f"  known_systems={known_systems}")
                 lines.append(f"  missions={missions}")
                 lines.append(f"  known_contacts={contacts}")
+                crisis = "true" if row["legitimacy"] <= 0.05 else "false"
+                lines.append(f"  crisis_legitimacy={crisis}")
             lines.append("")
 
             cur.execute(

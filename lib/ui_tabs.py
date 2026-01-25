@@ -40,6 +40,20 @@ class UITabsMixin:
             return default
         return data if isinstance(data, type(default)) else default
 
+    def _crisis_label_text(self, civ) -> str:
+        legitimacy = getattr(civ, "legitimacy", None)
+        if legitimacy is None:
+            return ""
+        try:
+            value = float(legitimacy)
+        except (TypeError, ValueError):
+            return ""
+        if value <= 0.02:
+            return "LEGITIMACY CRISIS (SEVERE)"
+        if value <= 0.05:
+            return "LEGITIMACY CRISIS"
+        return ""
+
     def _refresh_civ_tabs(self) -> None:
         """Rebuild civilization log tabs (master + civs)."""
         for tab in self.civ_tabs.tabs():
@@ -71,6 +85,15 @@ class UITabsMixin:
                 fg=self.theme["accent_alt"],
             )
             title.pack(side="left")
+            crisis_label = self._crisis_label_text(civ)
+            if crisis_label:
+                tk.Label(
+                    header,
+                    text=crisis_label,
+                    font=("Consolas", 9, "bold"),
+                    bg=self.theme["panel"],
+                    fg=self.theme["danger"],
+                ).pack(side="right")
 
             intent_frame = tk.Frame(frame, bg=self.theme["panel"])
             intent_frame.pack(fill="x", padx=8, pady=(0, 4))
@@ -615,6 +638,17 @@ class UITabsMixin:
                 width=18,
                 anchor="w",
             ).pack(side="left")
+            crisis_label = self._crisis_label_text(civ)
+            if crisis_label:
+                tk.Label(
+                    row,
+                    text="CRISIS",
+                    bg=self.theme["panel_alt"],
+                    fg=self.theme["danger"],
+                    font=("Consolas", 8, "bold"),
+                    width=8,
+                    anchor="w",
+                ).pack(side="left")
             spark = tk.Canvas(
                 row,
                 width=70,

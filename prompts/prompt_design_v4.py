@@ -42,6 +42,7 @@ CIV_NARRATOR_PROMPT = (
     "- React ONLY to applied_events and the current state in the context.\n"
     "- Do not invent events. Do not deny concrete outcomes (famine, illness, violence).\n"
     "- If missions, beacons, or contact events appear in context, reference them directly.\n"
+    "- If CRISIS flags are present (e.g., legitimacy crisis), acknowledge unrest or coercion.\n"
     "- If food_security <= 0.10 or health <= 0.10: write shorter, fragmented sentences.\n"
     "- If cohesion <= 0.10 or stability <= 0.10: show confusion, fear, contradictions.\n"
     "- Do not mention other civilizations as facts.\n\n"
