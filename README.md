@@ -1,4 +1,4 @@
-# Transcendence
+# Transcendence V6 BlackHole Version
 
 A tiny, living universe you can **watch**.  
 Procedural star systems, emergent civilizations, and a Game Master AI narrating what unfolds.
