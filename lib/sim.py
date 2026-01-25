@@ -1178,18 +1178,19 @@ class Simulation:
         """Cycle flow: rules engine → LLM scribes (if alive) → master report."""
         if self._universe_ended():
             return self.db.get_latest_cycle_id()
-        # One transaction per cycle keeps DB state atomic if interrupted mid-cycle.
         with self.db.transaction():
             cycle_id = self.persistence.create_cycle()
             if self._apply_player_commands(cycle_id):
                 self.db.set_setting("last_cycle", str(cycle_id))
                 return cycle_id
 
-            civ_states = self._load_civ_states()
-            universe_state = self._load_universe_state(cycle_id)
-            civ_events, global_events, delayed_applied = self.rules_engine.roll_cycle(
-                civ_states, universe_state
-            )
+        civ_states = self._load_civ_states()
+        universe_state = self._load_universe_state(cycle_id)
+        civ_events, global_events, delayed_applied = self.rules_engine.roll_cycle(
+            civ_states, universe_state
+        )
+
+        with self.db.transaction():
             # Clamp invalid stats and record any corrections before persisting.
             self.persistence.sanity_check_civs(cycle_id, civ_states)
             self.persistence.persist_rules_results(
@@ -1204,12 +1205,15 @@ class Simulation:
                 self.db.set_setting("last_cycle", str(cycle_id))
                 return cycle_id
 
-            civ_reports = self.narration.run_civ_scribes(
-                cycle_id, civ_states, civ_events, stream_callback
-            )
-            master_report = self.narration.run_master_scribe(
-                cycle_id, civ_states, global_events, civ_reports, stream_callback
-            )
+        # Narration runs outside DB transactions to avoid blocking UI.
+        civ_reports = self.narration.run_civ_scribes(
+            cycle_id, civ_states, civ_events, stream_callback
+        )
+        master_report = self.narration.run_master_scribe(
+            cycle_id, civ_states, global_events, civ_reports, stream_callback
+        )
+
+        with self.db.transaction():
             self.persistence.store_cycle_record(
                 cycle_id,
                 civ_states,
@@ -1224,7 +1228,7 @@ class Simulation:
             self._maybe_log_stat_summary(cycle_id, civ_states)
             self._maybe_log_fingerprint(cycle_id, civ_states, universe_state)
             self.db.set_setting("last_cycle", str(cycle_id))
-            return cycle_id
+        return cycle_id
 
     def _create_cycle(self) -> int:
         return self.persistence.create_cycle()
