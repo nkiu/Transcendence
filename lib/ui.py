@@ -228,12 +228,20 @@ class AppUI(UITabsMixin, tk.Frame):
         self.chaos_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.chaos_tab, text="Rules")
 
+        self.player_tab = tk.Frame(self.info_tabs, bg=self.theme["panel_alt"])
+        self.info_tabs.add(self.player_tab, text="Player")
+
+        self.cycle_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
+        self.info_tabs.add(self.cycle_tab, text="Cycles")
+
         self.errors_tab = tk.Frame(self.info_tabs, bg=self.theme["panel"])
         self.info_tabs.add(self.errors_tab, text="Errors")
 
+        self.civ_tabs = ttk.Notebook(right)
+        self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
 
-        player_row = tk.Frame(right, bg=self.theme["panel_alt"])
-        player_row.pack(fill="x", pady=(0, 6))
+        player_row = tk.Frame(self.player_tab, bg=self.theme["panel_alt"])
+        player_row.pack(fill="both", expand=True, padx=8, pady=8)
         player_row.columnconfigure(0, weight=1)
         player_row.columnconfigure(1, weight=1)
 
@@ -248,7 +256,7 @@ class AppUI(UITabsMixin, tk.Frame):
         ).pack(anchor="w", padx=8, pady=(6, 2))
         self.player_text = tk.Text(
             player_frame,
-            height=2,
+            height=3,
             wrap="word",
             bg=self.theme["panel"],
             fg=self.theme["text"],
@@ -310,13 +318,10 @@ class AppUI(UITabsMixin, tk.Frame):
             highlightbackground=self.theme["panel"],
         ).pack(side="left")
 
-        self.civ_tabs = ttk.Notebook(right)
-        self.civ_tabs.pack(fill="both", expand=True, pady=(6, 0))
-
         events_pane = tk.PanedWindow(
-            right, orient="horizontal", sashrelief="raised", bg=self.theme["bg"]
+            self.cycle_tab, orient="horizontal", sashrelief="raised", bg=self.theme["bg"]
         )
-        events_pane.pack(fill="both", expand=True, pady=(8, 0))
+        events_pane.pack(fill="both", expand=True, padx=8, pady=8)
 
         events_left = tk.Frame(events_pane, bg=self.theme["bg"])
         events_right = tk.Frame(events_pane, bg=self.theme["bg"])
