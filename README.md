@@ -133,4 +133,4 @@ The viewer includes cycle summaries, mission markers, narrative tabs, and a plot
 
 ## License
 
-MIT (or your preferred license)
+MIT License, (c) 2026 Denis Prim
