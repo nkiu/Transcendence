@@ -1,254 +1,254 @@
-TRANSCENDENCE – Rapport technique (fonctionnement du logiciel)
-==============================================================
+TRANSCENDENCE - Technical report (software behavior)
+====================================================
 
-Objectif du document
---------------------
-Ce rapport décrit comment fonctionne TRANSCENDENCE du point de vue logiciel : flux d’execution,
-modules principaux, structure des donnees, interaction LLM, et cycle de simulation. L’objectif
-est d’expliquer le systeme a un passionne de programmation (non‑pro) avec un niveau de detail
-approfondi mais accessible.
-
-
-1) Vue d’ensemble (ce que fait le logiciel)
--------------------------------------------
-TRANSCENDENCE est une simulation de civilisation a base de cycles. Chaque cycle :
-- applique des regles deterministes (regles de type "DND-like"),
-- met a jour des statistiques (cohesion, stabilite, etc.),
-- produit des evenements et des marques (marks),
-- produit un texte narratif (optionnel) via un LLM local (Ollama),
-- enregistre tout dans une base SQLite.
-
-La simulation ne depend pas du LLM pour les decisions. Le LLM est un “temoin” qui ecrit ce que
-les civilisations pensent vivre, mais les causes et effets sont fixes par les regles.
-
-Le programme est une application desktop (Tkinter). On choisit une base de donnees, un ruleset
-et un set de prompts, puis la simulation tourne en boucle jusqu’a extinction de toutes les
-civilisations. Quand l’univers finit, une fenetre finale affiche des “obituaries”.
+Document purpose
+----------------
+This report explains how TRANSCENDENCE works from a software perspective: execution flow,
+core modules, data structure, LLM interaction, and the simulation cycle. The goal is to
+explain the system to a programming enthusiast (non-pro) with a detailed but accessible
+level of depth.
 
 
-2) Architecture logique (modules clefs)
----------------------------------------
-Les modules principaux sont :
-- `lib/app.py` : demarrage, choix de base et parametres, creation de l’UI.
-- `lib/ui.py` : interface graphique et loop de simulation (thread worker).
-- `lib/sim.py` : orchestration du cycle (regles + LLM + persistence).
-- `lib/rules_engine.py` : moteur de regles (eligibilite, evenements, application d’effets).
-- `rulesets/*.py` : variantes de regles (harsh, star_trek_lite, cheat_utopia).
-- `lib/db.py` : base SQLite (schema, acces et export snapshot).
-- `lib/llm.py` : client LLM (Ollama), generation et parsing.
-- `prompts/*.py` : prompts LLM (format de sortie strict).
-- `lib/narrative_parser.py` : parse des sections LLM (LOG/GOD/etc).
-
-La separation principale est :
-UI -> Simulation -> Regles -> Persistance -> LLM (si active)
-
-
-3) Demarrage et configuration (App UI)
---------------------------------------
-Au lancement (`Transcendence.py` -> `lib/app.py`):
-1. Une fenetre “Select Game” est ouverte.
-2. L’utilisateur choisit : nouvelle base ou charge une base existante.
-3. Il peut activer le LLM (Ollama), choisir un modele, et un ruleset.
-4. Il peut modifier les prompts (events, civ, master) via des onglets.
-5. Les choix sont sauvegardes dans la base via `run_settings`.
-
-Ensuite :
-- `Simulation(db)` est creee.
-- `AppUI(root, sim)` est creee et lance la boucle.
-
-Le fait d’avoir la configuration en base rend les runs reproductibles : prompt set,
-ruleset, activation LLM, seed, etc.
-
-
-4) Cycle de simulation (niveau macro)
--------------------------------------
-Le “coeur” d’un cycle est dans `Simulation._run_single_cycle` :
-1. Creation d’un nouveau cycle en base.
-2. Chargement de l’etat (civilisations + universe state).
-3. Application des regles via `RulesEngine.roll_cycle`.
-4. Persist des resultats (stats, events, marks, delayed effects).
-5. Generation LLM (civilisations + master) si LLM actif.
-6. Sauvegarde de “cycle_records” (snapshot JSON detaille).
-7. Mise a jour de “last_cycle” et check d’extinction globale.
-
-Important : si l’univers est termine, la simulation ne fait plus de run LLM
-et bascule sur la fin (UI + obituaries).
-
-
-5) Modelisation des donnees (SQLite)
+1) Overview (what the software does)
 ------------------------------------
-La base SQLite est initialisee par `Database._init_schema`. Tables principales :
+TRANSCENDENCE is a civilization simulation built around cycles. Each cycle:
+- applies deterministic rules (DND-like rules),
+- updates statistics (cohesion, stability, etc.),
+- produces events and marks,
+- produces narrative text (optional) via a local LLM (Ollama),
+- records everything in a SQLite database.
 
-- `cycles` : chaque cycle, avec dates et resume.
-- `systems` / `planets` : carte stellaire.
-- `civilizations` : stats d’etat + meta (level, status, extinct, etc.).
-- `events` : evenements appliques (avec metadata JSON).
-- `marks` + `world_marks` : marqueurs globaux ou par civ.
-- `ai_logs` : textes LLM (prompts, logs, analyses).
-- `delayed_effects` : effets differes (qui s’appliquent dans le futur).
-- `delayed_effects_applied` : trace d’effets differes appliques.
-- `cycle_records` : enregistrement complet d’un cycle (JSON).
-- `run_settings` : configuration persistante (ruleset, prompts, etc.).
+The simulation does not depend on the LLM for decisions. The LLM is a "witness" who writes
+what civilizations believe they are experiencing, but causes and effects are fixed by rules.
 
-Les donnees “vivantes” sont donc :
-1) les stats (civilizations),
-2) les evenements (events),
-3) les marques (marks),
-4) les logs LLM (ai_logs),
-5) l’historique complet (cycle_records).
-
-Le snapshot TXT (export) est un export plat a partir de ces tables.
+The program is a desktop app (Tkinter). You pick a database, a ruleset, and a prompt set,
+then the simulation runs in a loop until all civilizations go extinct. When the universe
+ends, a final window shows the obituaries.
 
 
-6) Moteur de regles (RulesEngine)
+2) Logical architecture (key modules)
+-------------------------------------
+The main modules are:
+- `lib/app.py`: startup, database selection and parameters, UI creation.
+- `lib/ui.py`: GUI and simulation loop (worker thread).
+- `lib/sim.py`: cycle orchestration (rules + LLM + persistence).
+- `lib/rules_engine.py`: rules engine (eligibility, events, effects application).
+- `rulesets/*.py`: rule variants (harsh, star_trek_lite, cheat_utopia).
+- `lib/db.py`: SQLite layer (schema, access, snapshot export).
+- `lib/llm.py`: LLM client (Ollama), generation and parsing.
+- `prompts/*.py`: LLM prompts (strict output format).
+- `lib/narrative_parser.py`: parsing of LLM sections (LOG/GOD/etc).
+
+Main separation:
+UI -> Simulation -> Rules -> Persistence -> LLM (if enabled)
+
+
+3) Startup and configuration (App UI)
+-------------------------------------
+On launch (`Transcendence.py` -> `lib/app.py`):
+1. A "Select Game" window opens.
+2. The user chooses: new database or load an existing one.
+3. They can enable the LLM (Ollama), pick a model, and a ruleset.
+4. They can edit prompts (events, civ, master) via tabs.
+5. Choices are saved in the database via `run_settings`.
+
+Then:
+- `Simulation(db)` is created.
+- `AppUI(root, sim)` is created and starts the loop.
+
+Keeping configuration in the database makes runs reproducible: prompt set, ruleset,
+LLM enabled flag, seed, etc.
+
+
+4) Simulation cycle (macro level)
 ---------------------------------
-Le moteur est deterministic, avec un RNG seed. Il charge un catalogue d’evenements
-`lib/events_catalog.json` et applique un ruleset pour choisir quoi tirer.
+The "core" of a cycle is in `Simulation._run_single_cycle`:
+1. Create a new cycle in the database.
+2. Load state (civilizations + universe state).
+3. Apply rules via `RulesEngine.roll_cycle`.
+4. Persist results (stats, events, marks, delayed effects).
+5. LLM generation (civilizations + master) if LLM is active.
+6. Save `cycle_records` (detailed JSON snapshot).
+7. Update `last_cycle` and check for global extinction.
 
-Les etapes internes (simplifiees) :
-1. Pour chaque civ vivante : check stress/crise -> tirage d’evenements civ.
-2. Tirage d’event global parfois (selon ruleset).
-3. Application des events (deltas + marks + delayed_effects).
-4. Application des delayed_effects arrives a maturite.
-5. Test extinction (hard_extinction).
-6. Test collapse (collapse_trigger -> collapse_outcome).
+Important: if the universe is finished, the simulation no longer runs the LLM
+and switches to the end state (UI + obituaries).
 
-Les “AppliedEvent” contiennent :
+
+5) Data modeling (SQLite)
+-------------------------
+The SQLite database is initialized by `Database._init_schema`. Main tables:
+
+- `cycles`: each cycle, with dates and summary.
+- `systems` / `planets`: star map.
+- `civilizations`: state stats + metadata (level, status, extinct, etc.).
+- `events`: applied events (with JSON metadata).
+- `marks` + `world_marks`: global or per-civ markers.
+- `ai_logs`: LLM texts (prompts, logs, analyses).
+- `delayed_effects`: delayed effects (apply in the future).
+- `delayed_effects_applied`: trace of delayed effects applied.
+- `cycle_records`: full cycle record (JSON).
+- `run_settings`: persistent configuration (ruleset, prompts, etc.).
+
+The "live" data is therefore:
+1) stats (civilizations),
+2) events,
+3) marks,
+4) LLM logs (ai_logs),
+5) full history (cycle_records).
+
+The TXT snapshot (export) is a flat export built from these tables.
+
+
+6) Rules engine (RulesEngine)
+-----------------------------
+The engine is deterministic, with an RNG seed. It loads an event catalog
+`lib/events_catalog.json` and applies a ruleset to choose what to roll.
+
+Internal steps (simplified):
+1. For each living civ: check stress/crisis -> roll civ events.
+2. Roll a global event sometimes (per ruleset).
+3. Apply events (deltas + marks + delayed_effects).
+4. Apply delayed_effects that have matured.
+5. Extinction test (hard_extinction).
+6. Collapse test (collapse_trigger -> collapse_outcome).
+
+"AppliedEvent" contains:
 - kind, scope, severity, target
-- deltas (modif de stats)
+- deltas (stat changes)
 - add_marks / remove_marks
 - delayed_effects
 
-Les stats sont clamp (0.0 -> 1.0). Chaque event modifie directement
-les stats en memoire avant d’etre persiste.
+Stats are clamped (0.0 -> 1.0). Each event modifies stats in memory
+before being persisted.
 
 
-7) Rulesets (comportement de la simulation)
--------------------------------------------
-Trois rulesets majeurs :
-- `harsh_realism` : logique dure (crises souvent fatales).
-- `star_trek_lite` : progressions par phases (marks), optimiste.
-- `cheat_utopia` : mode “cheat” (stabilisateur, ascension presque garantie).
-
-Chaque ruleset peut redefinir :
-- stress/crise,
-- rolls mineurs/majeurs,
-- chance d’evenements globaux,
-- extinction dure,
-- collapse,
-- pondération des evenements.
-
-Le mode cheat_utopia introduit :
-- un “Guardian Stabilizer” qui remonte les stats,
-- une progression rapide de phase,
-- un attracteur post-scarcity,
-pour forcer une trajectoire positive.
-
-
-8) LLM : role, format, et parsing
+7) Rulesets (simulation behavior)
 ---------------------------------
-Le LLM (Ollama local) est optionnel.
-Il ne prend pas de decisions. Il ecrit uniquement des textes.
+Three main rulesets:
+- `harsh_realism`: harsh logic (crises often fatal).
+- `star_trek_lite`: phase-based progression (marks), optimistic.
+- `cheat_utopia`: "cheat" mode (stabilizer, ascension almost guaranteed).
 
-Les points clefs :
-- `LLMClient` (lib/llm.py) : fait les appels.
-- Les prompts sont stricts (ex. LOG/GOD, TITLE/LOG/ANALYSIS).
-- `lib/narrative_parser.py` parse et extrait les sections.
-- Les textes sont stockes dans `ai_logs`.
+Each ruleset can override:
+- stress/crisis,
+- minor/major rolls,
+- global event chance,
+- hard extinction,
+- collapse,
+- event weighting.
 
-En mode “No LLM”, le systeme genere des textes de secours
-pour garder la structure.
+The cheat_utopia mode introduces:
+- a "Guardian Stabilizer" that lifts stats,
+- rapid phase progression,
+- a post-scarcity attractor,
+to force a positive trajectory.
 
-Obituaries :
-quand l’univers finit, une seule requete LLM resume chaque civ.
-Le resultat est parse par sections “CIV:” et affiche dans une fenetre finale.
+
+8) LLM: role, format, and parsing
+---------------------------------
+The LLM (local Ollama) is optional.
+It does not make decisions. It only writes text.
+
+Key points:
+- `LLMClient` (lib/llm.py): performs calls.
+- Prompts are strict (e.g., LOG/GOD, TITLE/LOG/ANALYSIS).
+- `lib/narrative_parser.py` parses and extracts sections.
+- Texts are stored in `ai_logs`.
+
+In "No LLM" mode, the system generates fallback text
+to keep the structure.
+
+Obituaries:
+when the universe ends, a single LLM request summarizes each civ.
+The result is parsed by "CIV:" sections and displayed in a final window.
 
 
-9) UI : fonctionnement et boucle
---------------------------------
-L’UI est un `tk.Frame` (`AppUI`).
-Elle affiche :
-- carte des systemes,
+9) UI: behavior and loop
+------------------------
+The UI is a `tk.Frame` (`AppUI`).
+It shows:
+- system map,
 - events + details,
-- logs LLM par civilisation,
+- LLM logs per civilization,
 - status bar (cycle, events, civs),
-- infos de bas de page (seed, mode, cycles).
+- footer info (seed, mode, cycles).
 
-La simulation tourne dans un thread worker (`_run_loop`).
-Le thread envoie des evenements vers l’UI via une `queue`.
-L’UI consomme la queue toutes les 100 ms.
+The simulation runs in a worker thread (`_run_loop`).
+The thread sends events to the UI via a `queue`.
+The UI consumes the queue every 100 ms.
 
-Cela permet :
-1) de ne pas bloquer l’UI,
-2) d’afficher en streaming les chunks LLM,
-3) de rafraichir les events apres chaque cycle.
-
-
-10) Fin d’univers et “Obituary Window”
---------------------------------------
-Quand toutes les civs sont mortes :
-- `universe_ended` est mis a 1,
-- le worker s’arrete,
-- la fenetre principale se ferme (withdraw),
-- une fenetre “And this was Transcendence” s’ouvre.
-
-Cette fenetre affiche :
-1) un texte poetique d’attente,
-2) puis les obituaries LLM (ou fallback).
-
-Un bouton “Quit” exporte le snapshot TXT final
-et ajoute une section “== OBITUARIES ==”.
+This allows:
+1) not blocking the UI,
+2) streaming LLM chunks,
+3) refreshing events after each cycle.
 
 
-11) Export TXT (snapshot)
+10) End of universe and "Obituary Window"
+-----------------------------------------
+When all civs are dead:
+- `universe_ended` is set to 1,
+- the worker stops,
+- the main window closes (withdraw),
+- a window "And this was Transcendence" opens.
+
+This window shows:
+1) a poetic waiting text,
+2) then the LLM obituaries (or fallback).
+
+A "Quit" button exports the final TXT snapshot
+and adds a section "== OBITUARIES ==".
+
+
+11) TXT export (snapshot)
 -------------------------
-L’export snapshot (TXT) est fait dans `Database.export_snapshot`
-et regroupe cycles, systems, planets, civs, events, logs, marks, effects, settings.
+The snapshot export (TXT) is done in `Database.export_snapshot`
+and groups cycles, systems, planets, civs, events, logs, marks, effects, settings.
 
-Le snapshot est un format “humain” et sert de trace finale.
-Lors de la fin d’univers, les obituaries sont appended
-au snapshot pour conserver la narration finale.
+The snapshot is a "human" format and serves as a final trace.
+At the end of the universe, the obituaries are appended
+to the snapshot to preserve the final narrative.
 
 
-12) Flux complet d’execution (resume)
+12) Complete execution flow (summary)
 -------------------------------------
-1. User choisit DB + ruleset + prompts.
+1. User chooses DB + ruleset + prompts.
 2. Simulation init (seed + rules engine).
-3. UI lance worker.
-4. Worker boucle :
+3. UI starts worker.
+4. Worker loops:
    - rules engine -> events -> persistence
-   - LLM -> logs narratifs
+   - LLM -> narrative logs
    - UI refresh
-5. Si universe_ended :
+5. If universe_ended:
    - stop worker, show obituaries
-6. Quit final -> export TXT.
+6. Final quit -> export TXT.
 
 
-13) Ce qui rend le systeme robuste
-----------------------------------
-- LLM est strictement optionnel.
-- Output LLM est parse et valide, sinon fallback.
-- Event effects et stats sont clampes.
-- Persist complet de chaque cycle (cycle_records).
-- Decouplage UI / worker par queue.
+13) What makes the system robust
+--------------------------------
+- LLM is strictly optional.
+- LLM output is parsed and validated, otherwise fallback.
+- Event effects and stats are clamped.
+- Full persistence of each cycle (cycle_records).
+- UI / worker decoupled via queue.
 
 
-14) Extensibilite (ou ajouter des features)
--------------------------------------------
-Quelques points faciles a etendre :
-- Ajouter un ruleset dans `rulesets/`.
-- Ajouter un prompt set dans `prompts/`.
-- Ajouter une table ou mark dans `db.py`.
-- Ajouter un nouvel event dans `events_catalog.json`.
+14) Extensibility (where to add features)
+-----------------------------------------
+Some easy extension points:
+- Add a ruleset in `rulesets/`.
+- Add a prompt set in `prompts/`.
+- Add a table or mark in `db.py`.
+- Add a new event in `events_catalog.json`.
 
-Le systeme est concu pour evoluer sans casser les bases existantes,
-car les settings sont persistants et les colonnes sont ajoutees au besoin.
+The system is designed to evolve without breaking existing databases,
+because settings are persistent and columns are added as needed.
 
 
 15) Conclusion
 --------------
-TRANSCENDENCE est un simulateur regle‑d’abord, narration‑ensuite.
-Il se comporte comme un moteur de jeu de role automatique, avec un LLM
-utilise comme chroniqueur. La separation des couches (UI, simulation,
-regles, persistence) permet de garder la logique claire et testable,
-et de conserver un historique solide de chaque cycle.
+TRANSCENDENCE is a rules-first, narration-second simulator.
+It behaves like an automated tabletop RPG engine, with an LLM
+used as a chronicler. The separation of layers (UI, simulation,
+rules, persistence) keeps the logic clear and testable,
+and preserves a solid history of each cycle.
