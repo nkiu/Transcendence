@@ -66,12 +66,16 @@ class AppUI(UITabsMixin, tk.Frame):
     def _build(self) -> None:
         """Build the full UI layout."""
         self._apply_theme()
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=0)
+        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=0)
         header = tk.Frame(self, bg=self.theme["bg"])
-        header.pack(fill="x", padx=12, pady=8)
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 4))
 
         title = tk.Label(
             header,
-            text="TRANSCENDENCE :: UNIVERSE CONTROL",
+            text="TRANSCENDENCE :: UNIVERSE CONTROL :: V6_BackHole",
             font=("Consolas", 18, "bold"),
             bg=self.theme["bg"],
             fg=self.theme["accent"],
@@ -133,7 +137,7 @@ class AppUI(UITabsMixin, tk.Frame):
             sashrelief="raised",
             bg=self.theme["bg"],
         )
-        self.body_pane.pack(fill="both", expand=True, padx=12, pady=8)
+        self.body_pane.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
 
         left = tk.Frame(self.body_pane, bg=self.theme["bg"])
         right = tk.Frame(self.body_pane, bg=self.theme["bg"])
@@ -400,7 +404,7 @@ class AppUI(UITabsMixin, tk.Frame):
         self.event_detail.pack(fill="both", expand=True)
 
         footer = tk.Frame(self, bg=self.theme["bg"])
-        footer.pack(fill="x", padx=12, pady=(0, 12))
+        footer.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 12))
 
         self.status_var = tk.StringVar(value="Ready")
         status = tk.Label(
@@ -411,6 +415,16 @@ class AppUI(UITabsMixin, tk.Frame):
             font=("Consolas", 10),
         )
         status.pack(side="left")
+
+        self.footer_info_var = tk.StringVar(value="")
+        footer_info = tk.Label(
+            footer,
+            textvariable=self.footer_info_var,
+            bg=self.theme["bg"],
+            fg=self.theme["muted"],
+            font=("Consolas", 9),
+        )
+        footer_info.pack(side="left", padx=(12, 0))
 
     def _toggle_pause(self) -> None:
         self.is_running = not self.is_running
@@ -433,6 +447,7 @@ class AppUI(UITabsMixin, tk.Frame):
         self.status_var.set(
             f"Cycle {latest} | Events {len(self.events)} | Civs {civ_count} | Ruleset {ruleset}"
         )
+        self._update_footer_info(latest)
         if latest == 0 and self._needs_init_message:
             self.info_text.delete("1.0", tk.END)
             self.info_text.insert(
@@ -450,6 +465,21 @@ class AppUI(UITabsMixin, tk.Frame):
             if newest > self._last_event_id:
                 self._pulse_from_events(self.events, newest - self._last_event_id)
                 self._last_event_id = newest
+
+    def _update_footer_info(self, latest_cycle: Optional[int] = None) -> None:
+        seed = getattr(self.sim, "seed", "?")
+        ruleset = getattr(self.sim, "ruleset_name", "")
+        ruleset_label = "Utopia" if ruleset == "cheat_utopia" else "Harsh"
+        llm_label = "LLM" if getattr(self.sim.llm, "mode", "") == "ollama" else "NoLLM"
+        cycles = (
+            latest_cycle
+            if latest_cycle is not None
+            else self.sim.db.get_latest_cycle_id()
+        )
+        self.footer_info_var.set(
+            f"Run seed: {seed}  |  Mode: {ruleset_label} / {llm_label}  |  "
+            f"Cycles simulated: {cycles}"
+        )
 
     def _on_select(self, _event: tk.Event) -> None:
         selection = self.event_list.curselection()

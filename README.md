@@ -1,4 +1,4 @@
-# Transcendence
+# Transcendence V6 BlackHole Version
 
 A tiny, living universe you can **watch**.  
 Procedural star systems, emergent civilizations, and a Game Master AI narrating what unfolds.
@@ -48,6 +48,9 @@ You can also open the standalone DB viewer:
 ```bash
 python db_viewer.py path/to/sim.db
 ```
+
+The engine writes its version to SQLite (`run_settings.engine_version`) so you can flag
+save files created by incompatible builds. The DB viewer shows this value in the header.
 
 ## Prompts (editable per save)
 

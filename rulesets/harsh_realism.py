@@ -11,25 +11,29 @@ class HarshRealismRuleset(BaseRuleset):
     description: str = "Default DND-like ruleset (current behavior)."
 
     def is_stressed(self, civ: CivilizationState, universe: UniverseState) -> bool:
+        thresholds = self.config.stress_thresholds
         return (
-            civ.stats.eco_pressure > 0.55
-            or civ.stats.stability < 0.55
-            or civ.stats.food_security < 0.55
+            civ.stats.eco_pressure > thresholds.get("eco_pressure", 0.55)
+            or civ.stats.stability < thresholds.get("stability", 0.55)
+            or civ.stats.food_security < thresholds.get("food_security", 0.55)
         )
 
     def is_in_crisis(self, civ: CivilizationState, universe: UniverseState) -> bool:
+        thresholds = self.config.crisis_thresholds
         return (
-            civ.stats.eco_pressure > 0.75
-            or civ.stats.stability < 0.35
-            or civ.stats.cohesion < 0.35
-            or civ.stats.food_security < 0.35
+            civ.stats.eco_pressure > thresholds.get("eco_pressure", 0.75)
+            or civ.stats.stability < thresholds.get("stability", 0.35)
+            or civ.stats.cohesion < thresholds.get("cohesion", 0.35)
+            or civ.stats.food_security < thresholds.get("food_security", 0.35)
         )
 
     def minor_roll_count(self, civ: CivilizationState, universe: UniverseState, rng) -> int:
-        return rng.randint(0, 2)
+        max_rolls = self.config.max_event_rolls_base + self.config.additional_rolls_when_strained
+        return rng.randint(0, max(0, max_rolls))
 
     def major_roll_count(self, civ: CivilizationState, universe: UniverseState, rng) -> int:
-        return rng.randint(0, 1)
+        max_rolls = self.config.additional_rolls_when_crisis
+        return rng.randint(0, max(0, max_rolls))
 
     def global_event_chance(self, universe: UniverseState) -> float:
         return 0.30 if "CosmicInstability" in universe.global_marks else 0.15
@@ -40,16 +44,21 @@ class HarshRealismRuleset(BaseRuleset):
         return False
 
     def hard_extinction(self, civ: CivilizationState, universe: UniverseState) -> bool:
+        thresholds = self.config.extinction_thresholds
+        stability_low = thresholds.get("stability_low", 0.05)
+        health_low = thresholds.get("health_low", 0.05)
+        food_low = thresholds.get("food_low", 0.10)
+        zero_stability_limit = thresholds.get("consecutive_zero_stability", 2)
         if civ.stats.stability == 0.0:
             civ.consecutive_zero_stability += 1
         else:
             civ.consecutive_zero_stability = 0
         if (
-            (civ.stats.cohesion == 0.0 and civ.stats.stability <= 0.05)
-            or (civ.stats.food_security == 0.0 and civ.stats.health <= 0.05)
-            or (civ.stats.health <= 0.05 and civ.stats.food_security <= 0.10)
+            (civ.stats.cohesion == 0.0 and civ.stats.stability <= stability_low)
+            or (civ.stats.food_security == 0.0 and civ.stats.health <= health_low)
+            or (civ.stats.health <= health_low and civ.stats.food_security <= food_low)
             or (civ.stats.cohesion == 0.0 and civ.stats.food_security == 0.0)
-            or (civ.consecutive_zero_stability >= 2)
+            or (civ.consecutive_zero_stability >= zero_stability_limit)
         ):
             civ.alive = False
             civ.extinct = True
@@ -60,9 +69,17 @@ class HarshRealismRuleset(BaseRuleset):
         return False
 
     def collapse_trigger(self, civ: CivilizationState, universe: UniverseState) -> bool:
-        eco_extreme = civ.stats.eco_pressure > 0.95 and civ.stats.stability < 0.10
-        unrest_extreme = civ.stats.cohesion < 0.10 and civ.stats.inequality > 0.90
-        famine_extreme = civ.stats.food_security < 0.10
+        thresholds = self.config.collapse_thresholds
+        eco_extreme = (
+            civ.stats.eco_pressure > thresholds.get("eco_pressure", 0.95)
+            and civ.stats.stability < thresholds.get("stability", 0.10)
+        )
+        unrest_extreme = (
+            civ.stats.cohesion < thresholds.get("cohesion", 0.10)
+            and civ.stats.inequality > thresholds.get("inequality", 0.90)
+        )
+        famine_extreme = civ.stats.food_security < thresholds.get("food_security", 0.10)
+        limit = thresholds.get("consecutive_limit", 2)
 
         civ.consecutive_extreme_eco = (
             civ.consecutive_extreme_eco + 1 if eco_extreme else 0
@@ -73,9 +90,9 @@ class HarshRealismRuleset(BaseRuleset):
         civ.consecutive_famine = civ.consecutive_famine + 1 if famine_extreme else 0
 
         if (
-            civ.consecutive_extreme_eco < 2
-            and civ.consecutive_extreme_unrest < 2
-            and civ.consecutive_famine < 2
+            civ.consecutive_extreme_eco < limit
+            and civ.consecutive_extreme_unrest < limit
+            and civ.consecutive_famine < limit
         ):
             return False
 

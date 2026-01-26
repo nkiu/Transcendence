@@ -57,7 +57,7 @@
     "notes": "Food shock with social consequences later."
   },
   {
-    "id": "EVT_EPIdemic_WAVE",
+    "id": "EVT_EPIDEMIC_WAVE",
     "kind": "health",
     "scope": "civ",
     "weight_base": 0.8,

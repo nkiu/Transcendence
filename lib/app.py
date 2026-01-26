@@ -263,9 +263,11 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
     game_tab = tk.Frame(screen_tabs)
     prompt_tab = tk.Frame(screen_tabs)
     db_tab = tk.Frame(screen_tabs)
+    about_tab = tk.Frame(screen_tabs)
     screen_tabs.add(game_tab, text="Game")
     screen_tabs.add(prompt_tab, text="Prompts")
     screen_tabs.add(db_tab, text="Database")
+    screen_tabs.add(about_tab, text="About")
 
     btns = tk.Frame(game_tab)
     btns.pack(pady=6)
@@ -339,6 +341,25 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
     )
     ruleset_combo.pack(side="left", padx=6)
     ruleset_combo.set("harsh_realism")
+
+    about_text = tk.Text(about_tab, wrap="word", height=18)
+    about_text.pack(fill="both", expand=True, padx=12, pady=12)
+    about_content = (
+        "TRANSCENDENCE\n"
+        "v6_BlackHole\n\n"
+        "Created by Denis Prim - January 2026\n\n"
+        "TRANSCENDENCE is an experimental simulation exploring how civilizations emerge, "
+        "struggle, progress, and collapse under DND-like rule systems.\n\n"
+        "Local OLLAMA-powered LLMs are used not as decision-makers,"
+        "but as witnesses - narrating what civilizations believe they are living,"
+        "while the rules decide what actually happens.\n\n"
+        "This project is a personal experiment.\nNot really a game, and not really a simulation.\n\n"
+        "Coded by hand, with curiosity, "
+        "and the support of OpenAI CODEX.\n\n"
+        "http://denis.prim.swiss\n"
+    )
+    about_text.insert("1.0", about_content)
+    about_text.configure(state="disabled")
 
     tk.Button(llm_frame, text="Refresh Models", command=refresh_models).pack(
         anchor="w", pady=(4, 6)
@@ -534,7 +555,7 @@ def main() -> None:
     if not db_path:
         return
     root = tk.Tk()
-    root.title("Transcendence - Universe Sim")
+    root.title("Transcendence - Universe Sim - V6_BackHole")
     root.geometry("1000x650")
     loading = tk.Frame(root)
     loading.pack(fill="both", expand=True)

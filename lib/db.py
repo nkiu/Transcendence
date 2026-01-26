@@ -127,6 +127,8 @@ class Database:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._transaction_depth = 0
+        self._transaction_failed = False
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -312,7 +314,14 @@ class Database:
                 )
                 """
             )
-            self._conn.commit()
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cycles_id ON cycles(id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_cycle ON events(cycle)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_world_marks_cycle_civ ON world_marks(cycle, civ_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_world_marks_label ON world_marks(label)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_logs_cycle ON ai_logs(cycle)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_logs_civ ON ai_logs(civ_id)")
+            self._commit_if_autocommit()
             self._ensure_column("planets", "kind", "TEXT", "'rocky'")
             self._ensure_column("planets", "richness", "REAL", "0.0")
             self._ensure_column("planets", "science", "REAL", "0.0")
@@ -336,6 +345,13 @@ class Database:
             self._ensure_column("civilizations", "consecutive_zero_stability", "INTEGER", "0")
             self._ensure_column("civilizations", "consecutive_good_cycles", "INTEGER", "0")
 
+    def _commit_if_autocommit(self) -> None:
+        if self._transaction_depth == 0:
+            self._conn.commit()
+
+    def transaction(self):
+        return _DatabaseTransaction(self)
+
     def _ensure_column(
         self, table: str, column: str, col_type: str, default: str
     ) -> None:
@@ -347,7 +363,7 @@ class Database:
         cur.execute(
             f"ALTER TABLE {table} ADD COLUMN {column} {col_type} DEFAULT {default}"
         )
-        self._conn.commit()
+        self._commit_if_autocommit()
 
     def add_cycle(self, started_at: str, ended_at: str, summary: str) -> int:
         with self._lock:
@@ -356,7 +372,7 @@ class Database:
                 "INSERT INTO cycles (started_at, ended_at, summary) VALUES (?, ?, ?)",
                 (started_at, ended_at, summary),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def update_cycle_summary(self, cycle_id: int, summary: str) -> None:
@@ -366,7 +382,7 @@ class Database:
                 "UPDATE cycles SET summary = ? WHERE id = ?",
                 (summary, cycle_id),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def get_latest_cycle_id(self) -> int:
         with self._lock:
@@ -394,7 +410,7 @@ class Database:
                 """,
                 (cycle, kind, title, detail, json.dumps(metadata)),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def add_cycle_record(self, cycle: int, record: Dict[str, Any]) -> None:
@@ -408,7 +424,7 @@ class Database:
                 """,
                 (cycle, json.dumps(record)),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def universe_exists(self) -> bool:
         with self._lock:
@@ -424,7 +440,7 @@ class Database:
                 "INSERT INTO systems (name, x, y) VALUES (?, ?, ?)",
                 (name, x, y),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def add_planet(
@@ -456,7 +472,7 @@ class Database:
                 """,
                 (system_id, name, orbit_au, size, habitability, kind, richness, science),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def add_civilization(
@@ -545,7 +561,7 @@ class Database:
                     consecutive_good_cycles,
                 ),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def update_civilization(
@@ -655,7 +671,7 @@ class Database:
                 f"UPDATE civilizations SET {', '.join(fields)} WHERE id = ?",
                 values,
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def list_systems(self) -> List[StarSystem]:
         with self._lock:
@@ -790,7 +806,7 @@ class Database:
                 """,
                 (scope, civ_id, cycle, role, message),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def add_world_mark(
@@ -809,7 +825,7 @@ class Database:
                 """,
                 (cycle, civ_id, label, impact),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def list_world_marks(self, limit: int = 200) -> List[WorldMark]:
@@ -859,7 +875,7 @@ class Database:
                 """,
                 (cycle_start, cycle_end, civ_id, archetype, polarity, bias_json, intensity),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def list_active_chaos(self, cycle_id: int) -> List[ChaosProfile]:
@@ -936,7 +952,7 @@ class Database:
                 """,
                 (cycle_due, civ_id, kind, json.dumps(payload)),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def list_due_effects(self, cycle_due: int) -> List[DelayedEffect]:
@@ -1019,20 +1035,20 @@ class Database:
                     created_at,
                 ),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
             return int(cur.lastrowid)
 
     def delete_delayed_effect(self, effect_id: int) -> None:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM delayed_effects WHERE id = ?", (effect_id,))
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def clear_delayed_effects(self) -> None:
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("DELETE FROM delayed_effects")
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def list_marks(self, civ_id: Optional[int]) -> List[str]:
         with self._lock:
@@ -1066,7 +1082,7 @@ class Database:
                 """,
                 (cycle, civ_id, label, "added"),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def remove_mark(self, cycle: int, civ_id: Optional[int], label: str) -> None:
         scope = "global" if civ_id is None else "civ"
@@ -1083,7 +1099,7 @@ class Database:
                 """,
                 (cycle, civ_id, label, "removed"),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def set_setting(self, key: str, value: str) -> None:
         with self._lock:
@@ -1093,7 +1109,7 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
-            self._conn.commit()
+            self._commit_if_autocommit()
 
     def get_setting(self, key: str) -> Optional[str]:
         with self._lock:
@@ -1515,3 +1531,30 @@ class Database:
             lines.append("")
 
             return "\n".join(lines)
+
+
+class _DatabaseTransaction:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def __enter__(self):
+        self._db._lock.acquire()
+        if self._db._transaction_depth == 0:
+            self._db._transaction_failed = False
+            self._db._conn.execute("BEGIN")
+        self._db._transaction_depth += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            if exc_type:
+                self._db._transaction_failed = True
+            self._db._transaction_depth -= 1
+            if self._db._transaction_depth == 0:
+                if self._db._transaction_failed:
+                    self._db._conn.rollback()
+                else:
+                    self._db._conn.commit()
+        finally:
+            self._db._lock.release()
+        return False

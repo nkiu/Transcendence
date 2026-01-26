@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 from lib.rules_engine import AppliedEvent, DelayedEffect, CivilizationState, UniverseState, clamp
+from rulesets.base import RulesetConfig
 from rulesets.harsh_realism import HarshRealismRuleset
 
 
@@ -21,6 +22,25 @@ class CheatUtopiaRuleset(HarshRealismRuleset):
     description: str = (
         "Utopian cheat mode: strong stabilizing attractor; civilizations almost "
         "always reach high phases."
+    )
+    config: RulesetConfig = field(
+        default_factory=lambda: RulesetConfig(
+            good_cycle_thresholds={
+                "stability": 0.55,
+                "cohesion": 0.55,
+                "health": 0.55,
+                "food_security": 0.55,
+            },
+            good_cycle_streak_for_phase=2,
+            collapse_thresholds={
+                "eco_pressure": 0.98,
+                "stability": 0.10,
+                "cohesion": 0.10,
+                "inequality": 0.95,
+                "food_security": 0.08,
+                "consecutive_limit": 4,
+            },
+        )
     )
 
     def _ensure_phase(self, civ: CivilizationState) -> None:
@@ -76,10 +96,11 @@ class CheatUtopiaRuleset(HarshRealismRuleset):
         self._ensure_phase(civ)
 
         # Phase progression: fast ascension with a small sustainability downside.
+        good_thresholds = self.config.good_cycle_thresholds
         good_cycle = (
-            civ.stats.stability >= 0.55
-            and civ.stats.cohesion >= 0.55
-            and civ.stats.health >= 0.55
+            civ.stats.stability >= good_thresholds.get("stability", 0.55)
+            and civ.stats.cohesion >= good_thresholds.get("cohesion", 0.55)
+            and civ.stats.health >= good_thresholds.get("health", 0.55)
         )
         if good_cycle:
             civ.consecutive_good_cycles += 1
@@ -90,7 +111,7 @@ class CheatUtopiaRuleset(HarshRealismRuleset):
             total_good = self._get_good_cycle_total(civ)
 
         phase = self._get_phase(civ)
-        if civ.consecutive_good_cycles >= 2 and phase < 3:
+        if civ.consecutive_good_cycles >= self.config.good_cycle_streak_for_phase and phase < 3:
             self._set_phase(civ, phase + 1)
             civ.consecutive_good_cycles = 0
             self._apply_deltas(
@@ -169,9 +190,17 @@ class CheatUtopiaRuleset(HarshRealismRuleset):
         return False
 
     def collapse_trigger(self, civ: CivilizationState, universe: UniverseState) -> bool:
-        eco_extreme = civ.stats.eco_pressure > 0.98 and civ.stats.stability < 0.10
-        unrest_extreme = civ.stats.cohesion < 0.10 and civ.stats.inequality > 0.95
-        famine_extreme = civ.stats.food_security < 0.08
+        thresholds = self.config.collapse_thresholds
+        eco_extreme = (
+            civ.stats.eco_pressure > thresholds.get("eco_pressure", 0.98)
+            and civ.stats.stability < thresholds.get("stability", 0.10)
+        )
+        unrest_extreme = (
+            civ.stats.cohesion < thresholds.get("cohesion", 0.10)
+            and civ.stats.inequality > thresholds.get("inequality", 0.95)
+        )
+        famine_extreme = civ.stats.food_security < thresholds.get("food_security", 0.08)
+        limit = thresholds.get("consecutive_limit", 4)
 
         civ.consecutive_extreme_eco = (
             civ.consecutive_extreme_eco + 1 if eco_extreme else 0
@@ -182,9 +211,9 @@ class CheatUtopiaRuleset(HarshRealismRuleset):
         civ.consecutive_famine = civ.consecutive_famine + 1 if famine_extreme else 0
 
         if (
-            civ.consecutive_extreme_eco < 4
-            and civ.consecutive_extreme_unrest < 4
-            and civ.consecutive_famine < 4
+            civ.consecutive_extreme_eco < limit
+            and civ.consecutive_extreme_unrest < limit
+            and civ.consecutive_famine < limit
         ):
             return False
 
