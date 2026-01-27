@@ -3,6 +3,8 @@
 A tiny, living universe you can **watch**.  
 Procedural star systems, emergent civilizations, and a Game Master AI narrating what unfolds.
 
+![Transcendence – Universe Control](screenshot.png)
+
 This project is deliberately playful and exploratory: a sandbox where you observe, export, and study the stories your mini‑cosmos invents.  
 It is closer to an **LLM experiment** than a traditional simulator or game — the point is to see how models improvise world dynamics they were never trained to simulate.
 
