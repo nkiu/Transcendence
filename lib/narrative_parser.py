@@ -15,8 +15,9 @@ def parse_sections(text: str, allowed_headers: List[str]) -> Dict[str, str]:
     if not text:
         return {normalized[k]: v for k, v in result.items()}
 
+    # Match headers at line start OR after sentence-ending punctuation
     pattern = re.compile(
-        r"(?im)^\s*(" + "|".join(re.escape(h) for h in upper_headers) + r")\s*:\s*"
+        r"(?i)(?:^|\n|(?<=[.!?])\s+)\s*(" + "|".join(re.escape(h) for h in upper_headers) + r")\s*:\s*"
     )
     matches = list(pattern.finditer(text))
     if not matches:
@@ -27,11 +28,29 @@ def parse_sections(text: str, allowed_headers: List[str]) -> Dict[str, str]:
             result[upper_headers[0]] = fallback
         return {normalized[k]: v for k, v in result.items()}
 
+    # Check if there's a prelude (text before first header)
+    has_prelude = matches[0].start() > 0 and text[:matches[0].start()].strip()
+
     for idx, match in enumerate(matches):
         header = match.group(1).upper()
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         value = text[start:end].strip()
+
+        # For the last section, if there was a prelude, strip potential postlude
+        if idx == len(matches) - 1 and has_prelude:
+            # Find the last sentence that looks like content (ends with punctuation)
+            lines = value.split('\n')
+            content_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped:
+                    content_lines.append(stripped)
+                    # Stop after first complete content line for last section with prelude
+                    if stripped.endswith(('.', '!', '?')):
+                        break
+            value = '\n'.join(content_lines) if content_lines else value
+
         if not result[header]:
             result[header] = value
 

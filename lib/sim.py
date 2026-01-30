@@ -23,6 +23,7 @@ from lib.rules_engine import (
     CivilizationState,
     CivStats,
     DelayedEffect,
+    EventIds,
     RulesEngine,
     UniverseState,
 )
@@ -1153,6 +1154,18 @@ class Simulation:
         )
         self._ensure_universe()
 
+    def _safe_json_load(self, raw: Optional[str], expected_type: type = list) -> Any:
+        """Parse JSON safely, returning empty container on failure."""
+        if not raw:
+            return {} if expected_type == dict else []
+        try:
+            data = json.loads(raw)
+            if isinstance(data, expected_type):
+                return data
+            return {} if expected_type == dict else []
+        except json.JSONDecodeError:
+            return {} if expected_type == dict else []
+
     def run_cycles(self, count: int = 1) -> int:
         """Run N full cycles without streaming callbacks."""
         if count < 1:
@@ -1292,79 +1305,78 @@ class Simulation:
         civ_states = []
         planets = {p.id: p for p in self.db.list_planets()}
         systems = {s.id: s for s in self.db.list_systems()}
-        for civ in self.db.list_civilizations():
+        civs = list(self.db.list_civilizations())
+
+        # Batch load all civ settings in one query (fixes N+1 problem)
+        setting_keys = []
+        for civ in civs:
+            setting_keys.extend([
+                f"civ_progress_{civ.id}",
+                f"civ_agenda_{civ.id}",
+                f"civ_stance_{civ.id}",
+                f"civ_known_systems_{civ.id}",
+                f"civ_missions_{civ.id}",
+                f"civ_contacts_{civ.id}",
+                f"civ_contact_intents_{civ.id}",
+                f"civ_routes_{civ.id}",
+                f"civ_reach_{civ.id}",
+            ])
+        settings = self.db.get_settings_batch(setting_keys)
+
+        # Batch load marks for all civs
+        all_marks = self.db.list_marks_batch([civ.id for civ in civs])
+
+        for civ in civs:
             planet = planets.get(civ.home_planet_id)
             home_system = systems.get(planet.system_id).name if planet and planet.system_id in systems else ""
-            progress_raw = self.db.get_setting(f"civ_progress_{civ.id}")
+
+            # Parse progress
+            progress_raw = settings.get(f"civ_progress_{civ.id}")
             try:
                 progress = float(progress_raw) if progress_raw is not None else 0.0
             except ValueError:
                 progress = 0.0
             progress = max(0.0, min(1.0, progress))
+
             stage = civ.tech_stage or "stone"
-            agenda = (self.db.get_setting(f"civ_agenda_{civ.id}") or "SURVIVE").strip().upper()
+
+            # Parse agenda and stance
+            agenda = (settings.get(f"civ_agenda_{civ.id}") or "SURVIVE").strip().upper()
             if agenda not in AGENDA_TOKENS:
                 agenda = "SURVIVE"
-            stance = (self.db.get_setting(f"civ_stance_{civ.id}") or "PRAGMATIC").strip().upper()
+            stance = (settings.get(f"civ_stance_{civ.id}") or "PRAGMATIC").strip().upper()
             if stance not in STANCE_TOKENS:
                 stance = "PRAGMATIC"
             if self.llm.mode == "stub":
                 agenda = "SURVIVE"
                 stance = "PRAGMATIC"
-            known_systems = []
-            raw_known = self.db.get_setting(f"civ_known_systems_{civ.id}")
-            if raw_known:
-                try:
-                    data = json.loads(raw_known)
-                    if isinstance(data, list):
-                        known_systems = [str(item) for item in data if item]
-                except json.JSONDecodeError:
-                    known_systems = []
+
+            # Parse JSON fields using helper
+            raw_known = settings.get(f"civ_known_systems_{civ.id}")
+            known_data = self._safe_json_load(raw_known, list)
+            known_systems = [str(item) for item in known_data if item]
             if not known_systems and home_system:
                 known_systems = [home_system]
-            raw_missions = self.db.get_setting(f"civ_missions_{civ.id}")
-            missions = []
-            if raw_missions:
-                try:
-                    data = json.loads(raw_missions)
-                    if isinstance(data, list):
-                        missions = data
-                except json.JSONDecodeError:
-                    missions = []
-            raw_contacts = self.db.get_setting(f"civ_contacts_{civ.id}")
-            contacts = []
-            if raw_contacts:
-                try:
-                    data = json.loads(raw_contacts)
-                    if isinstance(data, list):
-                        contacts = [str(item) for item in data if item]
-                except json.JSONDecodeError:
-                    contacts = []
-            raw_intents = self.db.get_setting(f"civ_contact_intents_{civ.id}")
-            contact_intents = {}
-            if raw_intents:
-                try:
-                    data = json.loads(raw_intents)
-                    if isinstance(data, dict):
-                        contact_intents = {str(k): str(v) for k, v in data.items()}
-                except json.JSONDecodeError:
-                    contact_intents = {}
-            raw_routes = self.db.get_setting(f"civ_routes_{civ.id}")
-            established_routes = []
-            if raw_routes:
-                try:
-                    data = json.loads(raw_routes)
-                    if isinstance(data, list):
-                        established_routes = data
-                except json.JSONDecodeError:
-                    established_routes = []
-            raw_reach = self.db.get_setting(f"civ_reach_{civ.id}")
+
+            missions = self._safe_json_load(settings.get(f"civ_missions_{civ.id}"), list)
+
+            contacts_data = self._safe_json_load(settings.get(f"civ_contacts_{civ.id}"), list)
+            contacts = [str(item) for item in contacts_data if item]
+
+            intents_data = self._safe_json_load(settings.get(f"civ_contact_intents_{civ.id}"), dict)
+            contact_intents = {str(k): str(v) for k, v in intents_data.items()}
+
+            established_routes = self._safe_json_load(settings.get(f"civ_routes_{civ.id}"), list)
+
+            # Parse reach
+            raw_reach = settings.get(f"civ_reach_{civ.id}")
             try:
                 reach = int(raw_reach) if raw_reach is not None else 0
             except ValueError:
                 reach = 0
             if stage == "space" and reach < 1:
                 reach = 1
+
             stats = CivStats(
                 eco_pressure=civ.eco_pressure,
                 inequality=civ.inequality,
@@ -1397,7 +1409,7 @@ class Simulation:
                     known_contacts=contacts,
                     contact_intents=contact_intents,
                     established_routes=established_routes,
-                    marks=self.db.list_marks(civ.id),
+                    marks=all_marks.get(civ.id, []),
                     consecutive_extreme_eco=civ.consecutive_extreme_eco,
                     consecutive_extreme_unrest=civ.consecutive_extreme_unrest,
                     consecutive_famine=civ.consecutive_famine,

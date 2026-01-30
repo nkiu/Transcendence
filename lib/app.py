@@ -1,6 +1,7 @@
 import datetime as dt
 import glob
 import importlib.util
+import logging
 import os
 import queue
 import re
@@ -67,7 +68,8 @@ def _load_prompt_sets() -> dict:
         module = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(module)
-        except Exception:
+        except Exception as e:
+            logging.debug("Failed to load prompt module %s: %s", path, e)
             continue
         templates = extract_templates(module)
         if not templates:
@@ -221,8 +223,8 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
             )
             db.close()
             prompt_set_combo.set(SAVED_PROMPTS_LABEL)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("Failed to load prompts from DB: %s", e)
 
     def start_game() -> None:
         if not selected["path"]:

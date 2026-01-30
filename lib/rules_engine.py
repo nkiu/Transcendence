@@ -1,5 +1,6 @@
 import ast
 import json
+import logging
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -33,6 +34,22 @@ STAGE_THRESHOLDS = (
     (0.25, "bronze"),
     (0.00, "stone"),
 )
+
+
+class EventIds:
+    """Event ID constants to prevent typos and enable IDE autocomplete."""
+
+    LEGITIMACY_CRISIS_ONSET = "EVT_LEGITIMACY_CRISIS_ONSET"
+    LEGITIMACY_CRISIS_RECOVERY = "EVT_LEGITIMACY_CRISIS_RECOVERY"
+    FIRST_OUTPOST = "EVT_FIRST_OUTPOST"
+    CONTACT_SIGNAL = "EVT_CONTACT_SIGNAL"
+    CONTACT_DIRECT = "EVT_CONTACT_DIRECT"
+    # Legitimacy crisis events
+    GENERAL_STRIKE = "EVT_GENERAL_STRIKE"
+    MASS_UPRISING = "EVT_MASS_UPRISING"
+    REPRESSION_CAMPAIGN = "EVT_REPRESSION_CAMPAIGN"
+    SECESSION_ATTEMPT = "EVT_SECESSION_ATTEMPT"
+    EMERGENCY_REFORM = "EVT_EMERGENCY_REFORM"
 
 
 @dataclass
@@ -444,7 +461,7 @@ class RulesEngine:
             has_mark = "LegitimacyCrisis" in civ.marks
             if crisis and not has_mark:
                 onset = AppliedEvent(
-                    event_id="EVT_LEGITIMACY_CRISIS_ONSET",
+                    event_id=EventIds.LEGITIMACY_CRISIS_ONSET,
                     kind="politics",
                     scope="civ",
                     severity=2,
@@ -458,7 +475,7 @@ class RulesEngine:
                 self._apply_event(onset, civs, universe)
             if not crisis and has_mark and civ.stats.legitimacy > 0.08:
                 recovery = AppliedEvent(
-                    event_id="EVT_LEGITIMACY_CRISIS_RECOVERY",
+                    event_id=EventIds.LEGITIMACY_CRISIS_RECOVERY,
                     kind="policy",
                     scope="civ",
                     severity=1,
@@ -644,7 +661,8 @@ class RulesEngine:
                 tree = ast.parse(expr, mode="eval")
                 if not evaluator.visit(tree):
                     return False
-            except Exception:
+            except Exception as e:
+                logging.debug("Precondition eval failed for '%s': %s", expr, e)
                 return False
         return True
 
@@ -810,11 +828,11 @@ class RulesEngine:
         if not crisis:
             return 1.0
         crisis_ids = {
-            "EVT_GENERAL_STRIKE",
-            "EVT_MASS_UPRISING",
-            "EVT_REPRESSION_CAMPAIGN",
-            "EVT_SECESSION_ATTEMPT",
-            "EVT_EMERGENCY_REFORM",
+            EventIds.GENERAL_STRIKE,
+            EventIds.MASS_UPRISING,
+            EventIds.REPRESSION_CAMPAIGN,
+            EventIds.SECESSION_ATTEMPT,
+            EventIds.EMERGENCY_REFORM,
         }
         factor = 1.0
         if event.id in crisis_ids:
@@ -874,7 +892,7 @@ class RulesEngine:
             if isinstance(branch, dict):
                 success = self.rng.random() < 0.5
                 choice = branch.get("success") if success else branch.get("failure")
-                if success and event.id == "EVT_FIRST_OUTPOST" and civ is not None:
+                if success and event.id == EventIds.FIRST_OUTPOST and civ is not None:
                     choice = self._outpost_success_payload(civ)
                 payload = choice if isinstance(choice, dict) else {}
             delayed.append(
@@ -907,7 +925,7 @@ class RulesEngine:
     ) -> Dict[str, object]:
         if civ is None:
             return effects
-        if event.id == "EVT_CONTACT_SIGNAL":
+        if event.id == EventIds.CONTACT_SIGNAL:
             positive = self._contact_signal_positive(civ)
             if positive:
                 return {
@@ -989,7 +1007,7 @@ class RulesEngine:
         civ: CivilizationState,
         universe: UniverseState,
     ) -> Tuple[Optional[str], Optional[str]]:
-        if event.id != "EVT_CONTACT_DIRECT":
+        if event.id != EventIds.CONTACT_DIRECT:
             return None, None
         owned = {b.get("system") for b in universe.beacons if b.get("owner") == civ.id}
         candidates = []

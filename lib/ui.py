@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import os
 import datetime as dt
@@ -696,7 +697,8 @@ class AppUI(UITabsMixin, tk.Frame):
                 blocks = [raw]
             if not blocks:
                 blocks = self._fallback_obituaries(civ_entries)
-        except Exception:
+        except Exception as e:
+            logging.warning("Obituary generation failed: %s", e)
             blocks = self._fallback_obituaries(civ_entries) if civ_entries else [
                 "No obituary data available."
             ]
@@ -818,8 +820,8 @@ class AppUI(UITabsMixin, tk.Frame):
                 "last_cycle", str(self.sim.db.get_latest_cycle_id())
             )
             self.sim.db.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("Cleanup on quit from obituaries failed: %s", e)
         self.winfo_toplevel().destroy()
 
     def _on_canvas_resize(self, _event: tk.Event) -> None:
@@ -1199,7 +1201,8 @@ class AppUI(UITabsMixin, tk.Frame):
             top_height = int(height_left * 0.4)
             self.left_split.sash_place(0, 0, top_height)
             self._layout_set = True
-        except Exception:
+        except Exception as e:
+            logging.debug("Layout sash placement failed: %s", e)
             return
 
     def _show_system_info(self, system_id: int) -> None:
@@ -1268,8 +1271,8 @@ class AppUI(UITabsMixin, tk.Frame):
                 "last_cycle", str(self.sim.db.get_latest_cycle_id())
             )
             self.sim.db.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("Cleanup on shutdown failed: %s", e)
         self._hide_shutdown_overlay()
         self.winfo_toplevel().destroy()
 

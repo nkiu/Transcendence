@@ -1120,6 +1120,44 @@ class Database:
                 return None
             return str(row["value"])
 
+    def get_settings_batch(self, keys: List[str]) -> Dict[str, Optional[str]]:
+        """Fetch multiple settings in a single query."""
+        if not keys:
+            return {}
+        with self._lock:
+            cur = self._conn.cursor()
+            placeholders = ",".join("?" * len(keys))
+            cur.execute(
+                f"SELECT key, value FROM run_settings WHERE key IN ({placeholders})",
+                keys,
+            )
+            rows = cur.fetchall()
+            result: Dict[str, Optional[str]] = {key: None for key in keys}
+            for row in rows:
+                result[row["key"]] = str(row["value"])
+            return result
+
+    def list_marks_batch(self, civ_ids: List[int]) -> Dict[int, List[str]]:
+        """Fetch marks for multiple civilizations in a single query."""
+        if not civ_ids:
+            return {}
+        with self._lock:
+            cur = self._conn.cursor()
+            placeholders = ",".join("?" * len(civ_ids))
+            cur.execute(
+                f"""SELECT civ_id, label FROM marks
+                    WHERE scope = 'civ' AND civ_id IN ({placeholders})
+                    ORDER BY label""",
+                civ_ids,
+            )
+            rows = cur.fetchall()
+            result: Dict[int, List[str]] = {civ_id: [] for civ_id in civ_ids}
+            for row in rows:
+                civ_id = row["civ_id"]
+                if civ_id in result:
+                    result[civ_id].append(row["label"])
+            return result
+
     def list_ai_logs(self, scope: str, civ_id: Optional[int], limit: int = 200) -> List[AILog]:
         with self._lock:
             cur = self._conn.cursor()
