@@ -95,7 +95,7 @@ def _load_prompt_sets() -> dict:
     return prompt_sets
 
 
-def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
+def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
     os.makedirs("data", exist_ok=True)
     chooser = tk.Tk()
     chooser.withdraw()
@@ -105,6 +105,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
         "path": "",
         "ollama_on": True,
         "model": "",
+        "backend": "ollama",
         "ruleset": "harsh_realism",
         "prompt_master": DEFAULT_MASTER_SEED,
         "prompt_civ": DEFAULT_CIV_SEED,
@@ -156,12 +157,13 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
         selected["path"] = ""
         dialog.destroy()
 
-    def refresh_models() -> None:
-        ok = llm.healthcheck()
+    def refresh_models_with(client: LLMClient) -> None:
+        ok = client.healthcheck()
+        backend_label = "LLAMA.CPP" if client.backend_type == "llamacpp" else "OLLAMA"
         if ok:
-            status_var.set("OLLAMA: ONLINE")
+            status_var.set(f"{backend_label}: ONLINE")
             status_label.configure(fg="#1a8b5a")
-            models = llm.list_models()
+            models = client.list_models()
             if models:
                 model_combo.configure(values=models, state="readonly")
                 model_combo.set(models[0])
@@ -170,10 +172,15 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
                 model_combo.configure(values=[], state="normal")
                 model_combo.set("")
         else:
-            status_var.set("OLLAMA: OFFLINE")
+            status_var.set(f"{backend_label}: OFFLINE")
             status_label.configure(fg="#b34747")
             model_combo.configure(values=[], state="normal")
             model_combo.set("")
+
+    def refresh_models() -> None:
+        backend = selected.get("backend", "ollama")
+        client = LLMClient(mode="ollama", backend=backend)
+        refresh_models_with(client)
 
     def on_model_change(_event: tk.Event) -> None:
         value = model_combo.get().strip()
@@ -189,11 +196,28 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
             ollama_var.set(False)
             selected["ollama_on"] = False
             ollama_toggle.configure(state="disabled")
+            llamacpp_toggle.configure(state="disabled")
             model_combo.configure(state="disabled")
         else:
             ollama_toggle.configure(state="normal")
+            llamacpp_toggle.configure(state="normal")
             model_combo.configure(state="normal")
             selected["ollama_on"] = bool(ollama_var.get())
+
+    def toggle_llamacpp() -> None:
+        use_llamacpp = bool(llamacpp_var.get())
+        if use_llamacpp:
+            selected["backend"] = "llamacpp"
+            ollama_var.set(True)
+            selected["ollama_on"] = True
+            ollama_toggle.configure(state="disabled")
+            llm = LLMClient(mode="ollama", backend="llamacpp")
+            refresh_models_with(llm)
+        else:
+            selected["backend"] = "ollama"
+            ollama_toggle.configure(state="normal")
+            llm = LLMClient(mode="ollama", backend="ollama")
+            refresh_models_with(llm)
 
     def _load_prompts_from_db(path: str) -> None:
         try:
@@ -301,7 +325,12 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
     no_llm_toggle = tk.Checkbutton(
         llm_frame, text="No LLM (deterministic)", variable=no_llm_var, command=toggle_no_llm
     )
-    no_llm_toggle.pack(anchor="w", pady=(0, 6))
+    no_llm_toggle.pack(anchor="w", pady=(0, 2))
+    llamacpp_var = tk.BooleanVar(value=False)
+    llamacpp_toggle = tk.Checkbutton(
+        llm_frame, text="Use llama.cpp backend", variable=llamacpp_var, command=toggle_llamacpp
+    )
+    llamacpp_toggle.pack(anchor="w", pady=(0, 6))
 
     model_row = tk.Frame(llm_frame)
     model_row.pack(fill="x", pady=(2, 4))
@@ -540,6 +569,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict]:
         selected["prompt_civ"],
         selected["prompt_chaos"],
         selected["templates"],
+        selected["backend"],
     )
 
 
@@ -553,6 +583,7 @@ def main() -> None:
         prompt_civ,
         prompt_chaos,
         templates,
+        backend,
     ) = select_db_path()
     if not db_path:
         return
@@ -575,10 +606,12 @@ def main() -> None:
     def init_worker() -> None:
         try:
             os.environ["OLLAMA_ON"] = "1" if ollama_on else "0"
+            os.environ["LLM_BACKEND"] = backend
             if model:
                 os.environ["OLLAMA_MODEL"] = model
             db = Database(db_path)
             db.set_setting("llm_model", model if ollama_on else "")
+            db.set_setting("llm_backend", backend)
             db.set_setting("prompt_master", prompt_master)
             db.set_setting("prompt_civ", prompt_civ)
             db.set_setting("prompt_chaos", prompt_chaos)

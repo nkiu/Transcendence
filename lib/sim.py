@@ -1,10 +1,14 @@
 import datetime as dt
 import hashlib
 import json
+import logging
 import math
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from lib.db import Database, Planet, StarSystem
 from lib.llm import LLMClient
@@ -427,6 +431,23 @@ class NarrationService:
         civ_events: List[AppliedEvent],
         stream_callback: Optional[Callable[[Dict[str, str]], None]],
     ) -> Dict[str, Dict[str, str]]:
+        # Route to parallel or sequential implementation
+        if self.llm.parallel_enabled:
+            return self._run_civ_scribes_parallel(
+                cycle_id, civ_states, civ_events, stream_callback
+            )
+        return self._run_civ_scribes_sequential(
+            cycle_id, civ_states, civ_events, stream_callback
+        )
+
+    def _run_civ_scribes_sequential(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        civ_events: List[AppliedEvent],
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> Dict[str, Dict[str, str]]:
+        """Original sequential implementation for Ollama backend."""
         reports: Dict[str, Dict[str, str]] = {}
         for civ in civ_states:
             if not civ.alive or civ.extinct:
@@ -551,6 +572,190 @@ class NarrationService:
                     f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
                 )
         return reports
+
+    def _run_civ_scribes_parallel(
+        self,
+        cycle_id: int,
+        civ_states: List[CivilizationState],
+        civ_events: List[AppliedEvent],
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> Dict[str, Dict[str, str]]:
+        """Parallel implementation for llama.cpp backend using ThreadPoolExecutor."""
+        reports: Dict[str, Dict[str, str]] = {}
+        live_civs = [civ for civ in civ_states if civ.alive and not civ.extinct]
+
+        if not live_civs:
+            return reports
+
+        # Build events map for quick lookup
+        events_by_civ: Dict[str, List[AppliedEvent]] = {}
+        for civ in live_civs:
+            events_by_civ[civ.id] = [e for e in civ_events if e.target == civ.id]
+
+        def process_single_civ(civ: CivilizationState) -> Tuple[str, Dict[str, str]]:
+            """Process a single civilization's narration. Runs in worker thread."""
+            civ_id = civ.id
+            events = events_by_civ.get(civ_id, [])
+            context = self._build_civ_context(cycle_id, civ, events)
+
+            # Create thread-safe callback bound to this civ_id
+            chunk_callback = self._make_civ_chunk_callback(
+                civ_id, cycle_id, stream_callback
+            )
+
+            try:
+                # Emit log_start
+                if stream_callback:
+                    stream_callback({
+                        "type": "log_start",
+                        "scope": "civ",
+                        "civ_id": civ_id,
+                        "cycle": cycle_id,
+                        "role": "assistant",
+                    })
+
+                result = self.llm.generate_civ_thought(
+                    civ.name,
+                    cycle_id,
+                    context,
+                    on_chunk=chunk_callback,
+                    prompt_seed="",
+                    template=self.prompt_templates["civ_thought"],
+                )
+
+                if result:
+                    sections = parse_sections(result.response, ["LOG", "GOD"])
+                    agenda = parse_agenda(result.response)
+                    stance = parse_stance(result.response)
+                    news = parse_news(result.response)
+                    log_text = strip_control_lines(sections.get("LOG", "").strip())
+                    god_text = strip_control_lines(sections.get("GOD", "").strip())
+
+                    report = {
+                        "log_text": log_text,
+                        "god_text": god_text,
+                        "agenda": agenda,
+                        "stance": stance,
+                        "news": news,
+                        "model": result.model,
+                        "latency_ms": str(result.latency_ms),
+                    }
+
+                    # Emit log_end
+                    if stream_callback:
+                        stream_callback({
+                            "type": "log_end",
+                            "scope": "civ",
+                            "civ_id": civ_id,
+                            "cycle": cycle_id,
+                            "role": "assistant",
+                            "message": log_text,
+                        })
+
+                    return civ_id, report
+
+            except Exception as e:
+                logger.warning(f"Parallel LLM failed for civ {civ_id}: {e}")
+
+            # Fallback on error
+            fallback = self._generate_fallback_civ_text(civ, events, cycle_id)
+            sections = parse_sections(fallback, ["LOG", "GOD"])
+            agenda = parse_agenda(fallback)
+            stance = parse_stance(fallback)
+            news = parse_news(fallback)
+            log_text = strip_control_lines(sections.get("LOG", "").strip())
+            god_text = strip_control_lines(sections.get("GOD", "").strip())
+
+            report = {
+                "log_text": log_text,
+                "god_text": god_text,
+                "agenda": agenda,
+                "stance": stance,
+                "news": news,
+                "model": "",
+                "latency_ms": "0",
+            }
+
+            if stream_callback:
+                stream_callback({
+                    "type": "log_end",
+                    "scope": "civ",
+                    "civ_id": civ_id,
+                    "cycle": cycle_id,
+                    "role": "assistant",
+                    "message": log_text,
+                })
+
+            return civ_id, report
+
+        # Execute in parallel
+        with ThreadPoolExecutor(max_workers=self.llm.parallel_slots) as executor:
+            futures = {
+                executor.submit(process_single_civ, civ): civ
+                for civ in live_civs
+            }
+            for future in as_completed(futures):
+                try:
+                    civ_id, report = future.result()
+                    reports[civ_id] = report
+                    # Persist to DB (thread-safe with SQLite WAL)
+                    self.db.set_setting(f"civ_agenda_{civ_id}", report["agenda"])
+                    self.db.set_setting(f"civ_stance_{civ_id}", report["stance"])
+                    self.db.set_setting(f"civ_news_{civ_id}", report.get("news", ""))
+                    if report["log_text"]:
+                        self.db.add_ai_log(
+                            "civ", int(civ_id), cycle_id, "assistant", report["log_text"]
+                        )
+                    if report["god_text"]:
+                        self.db.add_ai_log(
+                            "civ", int(civ_id), cycle_id, "god", report["god_text"]
+                        )
+                    self.db.add_ai_log(
+                        "civ",
+                        int(civ_id),
+                        cycle_id,
+                        "intent",
+                        f"AGENDA: {report['agenda']}\nSTANCE: {report['stance']}\nNEWS: {report.get('news', '')}",
+                    )
+                except Exception as e:
+                    civ = futures[future]
+                    logger.error(f"Failed to get result for civ {civ.id}: {e}")
+
+        # Validate no extinct civs got reports
+        for civ in civ_states:
+            if (civ.extinct or not civ.alive) and civ.id in reports:
+                raise RuntimeError(
+                    f"Extinct civ {civ.id} generated output at cycle {cycle_id}"
+                )
+
+        return reports
+
+    def _make_civ_chunk_callback(
+        self,
+        civ_id: str,
+        cycle_id: int,
+        stream_callback: Optional[Callable[[Dict[str, str]], None]],
+    ) -> Optional[Callable[[str], None]]:
+        """Create a thread-safe callback bound to a specific civ_id.
+
+        The closure captures civ_id and cycle_id, ensuring chunks from
+        different threads are correctly tagged. The queue used by the
+        stream_callback is already thread-safe.
+        """
+        if not stream_callback:
+            return None
+
+        def chunk_handler(chunk: str) -> None:
+            stream_callback({
+                "type": "log_chunk",
+                "scope": "civ",
+                "civ_id": civ_id,
+                "cycle": cycle_id,
+                "role": "assistant",
+                "chunk": chunk,
+            })
+
+        return chunk_handler
 
     def run_master_scribe(
         self,
@@ -1116,7 +1321,8 @@ class Simulation:
             mode = "stub"
         else:
             mode = "ollama" if os.environ.get("OLLAMA_ON", "0") == "1" else "stub"
-        self.llm = LLMClient(mode=mode)
+        backend = os.environ.get("LLM_BACKEND", "ollama")
+        self.llm = LLMClient(mode=mode, backend=backend)
         if llm_setting is None:
             self.db.set_setting("llm_enabled", "1" if mode == "ollama" else "0")
         self.prompt_seeds = self._load_prompt_seeds()

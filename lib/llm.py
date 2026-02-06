@@ -1,11 +1,15 @@
 import json
+import logging
 import os
 import random
 import time
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -30,11 +34,291 @@ class LLMResult:
     latency_ms: int
 
 
+class LLMBackend(ABC):
+    """Abstract base class for LLM backends."""
+
+    @abstractmethod
+    def generate_stream(
+        self,
+        prompt: str,
+        model: str,
+        on_chunk: Optional[Callable[[str], None]],
+        timeout: int,
+        max_duration: int,
+    ) -> Tuple[str, int]:
+        """Generate response with optional streaming.
+
+        Returns:
+            Tuple of (full_response, latency_ms)
+        """
+        pass
+
+    @abstractmethod
+    def healthcheck(self, base_url: str) -> bool:
+        """Check if the backend is available."""
+        pass
+
+    @abstractmethod
+    def list_models(self, base_url: str) -> List[str]:
+        """List available models."""
+        pass
+
+
+class OllamaBackend(LLMBackend):
+    """Backend for Ollama API - POST to /api/generate, NDJSON streaming."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+
+    def generate_stream(
+        self,
+        prompt: str,
+        model: str,
+        on_chunk: Optional[Callable[[str], None]],
+        timeout: int = 45,
+        max_duration: int = 240,
+    ) -> Tuple[str, int]:
+        start = time.monotonic()
+        data = json.dumps(
+            {"model": model, "prompt": prompt, "stream": True}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        full = []
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                for raw in resp:
+                    if time.monotonic() - start > max_duration:
+                        break
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        continue
+                    chunk = str(payload.get("response", ""))
+                    if chunk:
+                        full.append(chunk)
+                        if on_chunk:
+                            on_chunk(chunk)
+                    if payload.get("done") is True:
+                        break
+        except (urllib.error.URLError, TimeoutError) as e:
+            logger.debug(f"Ollama request failed: {e}")
+            latency = int((time.monotonic() - start) * 1000)
+            return "", latency
+        latency = int((time.monotonic() - start) * 1000)
+        return "".join(full).strip(), latency
+
+    def healthcheck(self, base_url: str) -> bool:
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/api/tags", timeout=5
+            ) as resp:
+                return resp.status == 200
+        except urllib.error.URLError:
+            return False
+
+    def list_models(self, base_url: str) -> List[str]:
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/api/tags", timeout=5
+            ) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            models = payload.get("models", [])
+            names = []
+            for item in models:
+                name = str(item.get("name", "")).strip()
+                if name:
+                    names.append(name)
+            return names
+        except (urllib.error.URLError, json.JSONDecodeError):
+            return []
+
+
+class LlamaCppBackend(LLMBackend):
+    """Backend for llama.cpp server - POST to /v1/completions, SSE streaming."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+
+    def generate_stream(
+        self,
+        prompt: str,
+        model: str,
+        on_chunk: Optional[Callable[[str], None]],
+        timeout: int = 45,
+        max_duration: int = 240,
+    ) -> Tuple[str, int]:
+        start = time.monotonic()
+        n_predict = int(os.environ.get("LLAMACPP_N_PREDICT", "4096"))
+        repeat_penalty = float(os.environ.get("LLAMACPP_REPEAT_PENALTY", "1.3"))
+        data = json.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "stream": True,
+                "n_predict": n_predict,
+                "temperature": 0.7,
+                "repeat_penalty": repeat_penalty,
+                "repeat_last_n": 256,
+            }
+        ).encode("utf-8")
+        url = f"{self.base_url}/completion"
+        prompt_preview = prompt[:80].replace("\n", " ")
+        logger.info(
+            "llama.cpp >> POST %s (model=%s, prompt=%d chars: \"%s...\")",
+            url, model, len(prompt), prompt_preview,
+        )
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        full = []
+        token_count = 0
+        first_token_time = None
+        last_log_count = 0
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                logger.info("llama.cpp << connected, waiting for tokens...")
+                for raw in resp:
+                    elapsed = time.monotonic() - start
+                    if elapsed > max_duration:
+                        logger.warning(
+                            "llama.cpp !! max duration reached (%ds), aborting",
+                            max_duration,
+                        )
+                        break
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    if line == "data: [DONE]":
+                        break
+                    if line.startswith("data: "):
+                        line = line[6:]
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # Native /completion returns "content", OAI compat returns "choices"
+                    chunk = ""
+                    if "content" in payload:
+                        chunk = str(payload["content"])
+                    elif "choices" in payload:
+                        choices = payload["choices"]
+                        if choices:
+                            chunk = str(choices[0].get("text", ""))
+                    if chunk:
+                        full.append(chunk)
+                        token_count += 1
+                        if first_token_time is None:
+                            first_token_time = elapsed
+                            logger.info(
+                                "llama.cpp << first token after %.1fs", elapsed,
+                            )
+                        if token_count - last_log_count >= 50:
+                            tps = token_count / (elapsed - first_token_time) if elapsed > first_token_time else 0
+                            logger.info(
+                                "llama.cpp .. %d tokens, %.1fs elapsed, %.1f tok/s",
+                                token_count, elapsed, tps,
+                            )
+                            last_log_count = token_count
+                        if on_chunk:
+                            on_chunk(chunk)
+                    if payload.get("stop") is True:
+                        break
+        except Exception as e:
+            logger.warning("llama.cpp !! request failed: %s", e)
+            latency = int((time.monotonic() - start) * 1000)
+            return "", latency
+        latency = int((time.monotonic() - start) * 1000)
+        tps = token_count / (latency / 1000) if latency > 0 else 0
+        logger.info(
+            "llama.cpp << done: %d tokens in %.1fs (%.1f tok/s)",
+            token_count, latency / 1000, tps,
+        )
+        return "".join(full).strip(), latency
+
+    def healthcheck(self, base_url: str) -> bool:
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/health", timeout=5
+            ) as resp:
+                return resp.status == 200
+        except urllib.error.URLError:
+            # Try /v1/models as fallback
+            try:
+                with urllib.request.urlopen(
+                    f"{base_url}/v1/models", timeout=5
+                ) as resp:
+                    return resp.status == 200
+            except urllib.error.URLError:
+                return False
+
+    def list_models(self, base_url: str) -> List[str]:
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/v1/models", timeout=5
+            ) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            models = payload.get("data", [])
+            names = []
+            for item in models:
+                name = str(item.get("id", "")).strip()
+                if name:
+                    names.append(name)
+            return names
+        except (urllib.error.URLError, json.JSONDecodeError):
+            return []
+
+
 class LLMClient:
-    def __init__(self, mode: str = "stub", model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        mode: str = "stub",
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
+    ) -> None:
         self.mode = mode
         self.model = model or os.environ.get("OLLAMA_MODEL", "mistral:7b")
-        self.base_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+        # Backend selection: "ollama" (default) or "llamacpp"
+        self._backend_type = backend or os.environ.get("LLM_BACKEND", "ollama")
+        self._llamacpp_url = os.environ.get("LLAMACPP_URL", "http://localhost:8080")
+        self._parallel_slots = int(os.environ.get("LLAMACPP_PARALLEL", "4"))
+
+        # Initialize backend
+        if self._backend_type == "llamacpp":
+            self.base_url = self._llamacpp_url
+            self._backend: LLMBackend = LlamaCppBackend(self.base_url)
+        else:
+            self.base_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+            self._backend: LLMBackend = OllamaBackend(self.base_url)
+
+    @property
+    def parallel_enabled(self) -> bool:
+        """Check if parallel execution is enabled (llama.cpp backend)."""
+        return self._backend_type == "llamacpp" and self.mode != "stub"
+
+    @property
+    def parallel_slots(self) -> int:
+        """Number of parallel slots available for concurrent requests."""
+        return self._parallel_slots if self.parallel_enabled else 1
+
+    @property
+    def backend_type(self) -> str:
+        """Return the current backend type."""
+        return self._backend_type
 
     def generate_events(
         self,
@@ -209,70 +493,29 @@ class LLMClient:
     ) -> Tuple[str, int]:
         if self.mode != "ollama":
             raise RuntimeError("LLM call blocked: LLM disabled")
-        start = time.monotonic()
-        max_duration = int(os.environ.get("OLLAMA_CALL_TIMEOUT", "240"))
-        data = json.dumps(
-            {"model": self.model, "prompt": prompt, "stream": True}
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/api/generate",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        if self._backend_type == "llamacpp":
+            default_timeout = "600"
+        else:
+            default_timeout = "240"
+        max_duration = int(os.environ.get("LLM_CALL_TIMEOUT",
+                           os.environ.get("OLLAMA_CALL_TIMEOUT", default_timeout)))
+        return self._backend.generate_stream(
+            prompt=prompt,
+            model=self.model,
+            on_chunk=on_chunk,
+            timeout=45,
+            max_duration=max_duration,
         )
-        full = []
-        try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                for raw in resp:
-                    if time.monotonic() - start > max_duration:
-                        break
-                    if not raw:
-                        continue
-                    try:
-                        payload = json.loads(raw.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        continue
-                    chunk = str(payload.get("response", ""))
-                    if chunk:
-                        full.append(chunk)
-                        if on_chunk:
-                            on_chunk(chunk)
-                    if payload.get("done") is True:
-                        break
-        except (urllib.error.URLError, TimeoutError):
-            latency = int((time.monotonic() - start) * 1000)
-            return "", latency
-        latency = int((time.monotonic() - start) * 1000)
-        return "".join(full).strip(), latency
 
     def healthcheck(self) -> bool:
         if self.mode == "stub":
             return False
-        try:
-            with urllib.request.urlopen(
-                f"{self.base_url}/api/tags", timeout=5
-            ) as resp:
-                return resp.status == 200
-        except urllib.error.URLError:
-            return False
+        return self._backend.healthcheck(self.base_url)
 
     def list_models(self) -> List[str]:
         if self.mode == "stub":
             return []
-        try:
-            with urllib.request.urlopen(
-                f"{self.base_url}/api/tags", timeout=5
-            ) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            models = payload.get("models", [])
-            names = []
-            for item in models:
-                name = str(item.get("name", "")).strip()
-                if name:
-                    names.append(name)
-            return names
-        except (urllib.error.URLError, json.JSONDecodeError):
-            return []
+        return self._backend.list_models(self.base_url)
 
     def _parse_civ_json(self, raw: str, count: int) -> Optional[List[CivSeed]]:
         try:

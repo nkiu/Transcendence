@@ -649,12 +649,10 @@ class AppUI(UITabsMixin, tk.Frame):
         if event_type == "log_start":
             text.insert(tk.END, f"[C{cycle}] {role}:\n", "header")
             text.see(tk.END)
-            self._focus_llm_tab(scope, civ_id)
         elif event_type == "log_chunk":
             tag = role if role in ("prompt", "god", "analysis") else "assistant"
             text.insert(tk.END, payload.get("chunk", ""), tag)
             text.see(tk.END)
-            self._focus_llm_tab(scope, civ_id)
         elif event_type == "log_end":
             text.insert(tk.END, "\n\n", "assistant")
             text.see(tk.END)
