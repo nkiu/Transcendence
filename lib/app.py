@@ -377,7 +377,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
     about_text.pack(fill="both", expand=True, padx=12, pady=12)
     about_content = (
         "TRANSCENDENCE\n"
-        "v6_BlackHole\n\n"
+        "v7_llama.cpp\n\n"
         "Created by Denis Prim - January 2026\n\n"
         "TRANSCENDENCE is an experimental simulation exploring how civilizations emerge, "
         "struggle, progress, and collapse under DND-like rule systems.\n\n"
@@ -588,7 +588,7 @@ def main() -> None:
     if not db_path:
         return
     root = tk.Tk()
-    root.title("Transcendence - Universe Sim - V6_BackHole")
+    root.title("Transcendence - Universe Sim - V7_llama.cpp")
     root.geometry("1000x650")
     loading = tk.Frame(root)
     loading.pack(fill="both", expand=True)
