@@ -95,7 +95,7 @@ def _load_prompt_sets() -> dict:
     return prompt_sets
 
 
-def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
+def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str, str]:
     os.makedirs("data", exist_ok=True)
     chooser = tk.Tk()
     chooser.withdraw()
@@ -106,6 +106,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
         "ollama_on": True,
         "model": "",
         "backend": "ollama",
+        "llamacpp_url": os.environ.get("LLAMACPP_URL", "http://127.0.0.1:8080"),
         "ruleset": "harsh_realism",
         "prompt_master": DEFAULT_MASTER_SEED,
         "prompt_civ": DEFAULT_CIV_SEED,
@@ -179,6 +180,11 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
 
     def refresh_models() -> None:
         backend = selected.get("backend", "ollama")
+        if backend == "llamacpp":
+            url = llamacpp_url_entry.get().strip()
+            if url:
+                selected["llamacpp_url"] = url
+                os.environ["LLAMACPP_URL"] = url
         client = LLMClient(mode="ollama", backend=backend)
         refresh_models_with(client)
 
@@ -197,10 +203,13 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
             selected["ollama_on"] = False
             ollama_toggle.configure(state="disabled")
             llamacpp_toggle.configure(state="disabled")
+            llamacpp_url_entry.configure(state="disabled")
             model_combo.configure(state="disabled")
         else:
             ollama_toggle.configure(state="normal")
             llamacpp_toggle.configure(state="normal")
+            if llamacpp_var.get():
+                llamacpp_url_entry.configure(state="normal")
             model_combo.configure(state="normal")
             selected["ollama_on"] = bool(ollama_var.get())
 
@@ -211,11 +220,17 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
             ollama_var.set(True)
             selected["ollama_on"] = True
             ollama_toggle.configure(state="disabled")
+            llamacpp_url_entry.configure(state="normal")
+            url = llamacpp_url_entry.get().strip()
+            if url:
+                selected["llamacpp_url"] = url
+                os.environ["LLAMACPP_URL"] = url
             llm = LLMClient(mode="ollama", backend="llamacpp")
             refresh_models_with(llm)
         else:
             selected["backend"] = "ollama"
             ollama_toggle.configure(state="normal")
+            llamacpp_url_entry.configure(state="disabled")
             llm = LLMClient(mode="ollama", backend="ollama")
             refresh_models_with(llm)
 
@@ -256,6 +271,10 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
             return
         ruleset_name = ruleset_combo.get().strip() or "harsh_realism"
         selected["ruleset"] = ruleset_name
+        if selected["backend"] == "llamacpp":
+            url = llamacpp_url_entry.get().strip()
+            if url:
+                selected["llamacpp_url"] = url
         selected["prompt_master"] = DEFAULT_MASTER_SEED
         selected["prompt_civ"] = DEFAULT_CIV_SEED
         selected["prompt_chaos"] = DEFAULT_CHAOS_SEED
@@ -326,11 +345,17 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
         llm_frame, text="No LLM (deterministic)", variable=no_llm_var, command=toggle_no_llm
     )
     no_llm_toggle.pack(anchor="w", pady=(0, 2))
+    llamacpp_row = tk.Frame(llm_frame)
+    llamacpp_row.pack(anchor="w", pady=(0, 6))
     llamacpp_var = tk.BooleanVar(value=False)
     llamacpp_toggle = tk.Checkbutton(
-        llm_frame, text="Use llama.cpp backend", variable=llamacpp_var, command=toggle_llamacpp
+        llamacpp_row, text="Use llama.cpp backend", variable=llamacpp_var, command=toggle_llamacpp
     )
-    llamacpp_toggle.pack(anchor="w", pady=(0, 6))
+    llamacpp_toggle.pack(side="left")
+    llamacpp_url_entry = tk.Entry(llamacpp_row, width=28)
+    llamacpp_url_entry.insert(0, selected["llamacpp_url"])
+    llamacpp_url_entry.configure(state="disabled")
+    llamacpp_url_entry.pack(side="left", padx=(6, 0))
 
     model_row = tk.Frame(llm_frame)
     model_row.pack(fill="x", pady=(2, 4))
@@ -570,6 +595,7 @@ def select_db_path() -> tuple[str, bool, str, str, str, str, str, dict, str]:
         selected["prompt_chaos"],
         selected["templates"],
         selected["backend"],
+        selected["llamacpp_url"],
     )
 
 
@@ -584,6 +610,7 @@ def main() -> None:
         prompt_chaos,
         templates,
         backend,
+        llamacpp_url,
     ) = select_db_path()
     if not db_path:
         return
@@ -607,11 +634,14 @@ def main() -> None:
         try:
             os.environ["OLLAMA_ON"] = "1" if ollama_on else "0"
             os.environ["LLM_BACKEND"] = backend
+            if llamacpp_url:
+                os.environ["LLAMACPP_URL"] = llamacpp_url
             if model:
                 os.environ["OLLAMA_MODEL"] = model
             db = Database(db_path)
             db.set_setting("llm_model", model if ollama_on else "")
             db.set_setting("llm_backend", backend)
+            db.set_setting("llamacpp_url", llamacpp_url or "")
             db.set_setting("prompt_master", prompt_master)
             db.set_setting("prompt_civ", prompt_civ)
             db.set_setting("prompt_chaos", prompt_chaos)
