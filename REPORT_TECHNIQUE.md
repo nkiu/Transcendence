@@ -15,7 +15,7 @@ TRANSCENDENCE is a civilization simulation built around cycles. Each cycle:
 - applies deterministic rules (DND-like rules),
 - updates statistics (cohesion, stability, etc.),
 - produces events and marks,
-- produces narrative text (optional) via a local LLM (Ollama),
+- produces narrative text (optional) via a local LLM (Ollama or llama.cpp),
 - records everything in a SQLite database.
 
 The simulation does not depend on the LLM for decisions. The LLM is a "witness" who writes
@@ -35,7 +35,7 @@ The main modules are:
 - `lib/rules_engine.py`: rules engine (eligibility, events, effects application).
 - `rulesets/*.py`: rule variants (harsh, star_trek_lite, cheat_utopia).
 - `lib/db.py`: SQLite layer (schema, access, snapshot export).
-- `lib/llm.py`: LLM client (Ollama), generation and parsing.
+- `lib/llm.py`: LLM client (Ollama or llama.cpp), backend abstraction, generation and parsing.
 - `prompts/*.py`: LLM prompts (strict output format).
 - `lib/narrative_parser.py`: parsing of LLM sections (LOG/GOD/etc).
 
@@ -147,14 +147,25 @@ to force a positive trajectory.
 
 8) LLM: role, format, and parsing
 ---------------------------------
-The LLM (local Ollama) is optional.
-It does not make decisions. It only writes text.
+The LLM is optional. It does not make decisions. It only writes text.
+
+Two backends are supported:
+- **Ollama** (default): POST to `/api/generate`, NDJSON streaming.
+- **llama.cpp**: POST to `/completion`, SSE streaming. Supports parallel
+  civ narration via `ThreadPoolExecutor` (configurable slots via `LLAMACPP_PARALLEL`).
+
+The backend is selected via the `LLM_BACKEND` environment variable (`ollama` or `llamacpp`).
+Both backends implement the `LLMBackend` abstract class (`generate_stream`, `healthcheck`,
+`list_models`).
 
 Key points:
-- `LLMClient` (lib/llm.py): performs calls.
+- `LLMClient` (lib/llm.py): performs calls via the selected backend.
+- `LLMBackend` / `OllamaBackend` / `LlamaCppBackend`: backend abstraction.
 - Prompts are strict (e.g., LOG/GOD, TITLE/LOG/ANALYSIS).
 - `lib/narrative_parser.py` parses and extracts sections.
 - Texts are stored in `ai_logs`.
+- With llama.cpp, civ narrations run in parallel (`_run_civ_scribes_parallel` in sim.py),
+  sending concurrent requests up to the configured slot count.
 
 In "No LLM" mode, the system generates fallback text
 to keep the structure.

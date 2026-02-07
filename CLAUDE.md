@@ -29,10 +29,13 @@ Transcendence.py → lib/app.py (startup UI) → lib/sim.py (orchestrator)
                                                     ↓
                                           lib/db.py (SQLite persistence)
                                                     ↓
-                                          lib/llm.py (Ollama client, optional)
+                                          lib/llm.py (LLM client, optional)
+                                            ├── OllamaBackend (Ollama API)
+                                            └── LlamaCppBackend (llama.cpp server)
 ```
 
 **Key separation**: UI runs in main thread, simulation runs in worker thread, communication via queue.
+**LLM backends**: Ollama (default) or llama.cpp. The llama.cpp backend supports parallel civ narration via `ThreadPoolExecutor`.
 
 ### Core Modules
 
@@ -40,7 +43,7 @@ Transcendence.py → lib/app.py (startup UI) → lib/sim.py (orchestrator)
 - **lib/rules_engine.py**: Deterministic rule resolver with seeded RNG. `roll_cycle()` applies all rules.
 - **lib/db.py**: SQLite schema and persistence. All state lives in the database.
 - **lib/ui.py**: Tkinter interface with galaxy map, event log, civ tabs, stats display.
-- **lib/llm.py**: Ollama client with streaming. Falls back gracefully if unavailable.
+- **lib/llm.py**: LLM client with backend abstraction (`OllamaBackend`, `LlamaCppBackend`). Supports streaming and parallel requests (llama.cpp). Falls back gracefully if unavailable.
 - **lib/narrative_parser.py**: Parses LLM output (LOG/GOD/AGENDA/STANCE/NEWS format).
 
 ### Extension Points
@@ -56,7 +59,7 @@ Transcendence.py → lib/app.py (startup UI) → lib/sim.py (orchestrator)
 2. Load live civ states
 3. `RulesEngine.roll_cycle()`: roll events, apply effects, check extinction/collapse
 4. Persist stats, events, marks, delayed effects
-5. Generate LLM narratives (if enabled)
+5. Generate LLM narratives (if enabled; parallel via ThreadPoolExecutor with llama.cpp)
 6. Save full JSON snapshot to `cycle_records`
 7. Update UI via queue
 
@@ -66,6 +69,17 @@ Transcendence.py → lib/app.py (startup UI) → lib/sim.py (orchestrator)
 - **Delayed Effects**: Stat changes that apply N cycles in the future
 - **Tech Stages**: Progression via marks (Proto → Industrial → EarlySpace → Spacefaring)
 - **Collapse Table**: D&D-style 1-12 roll for catastrophic outcomes when collapse triggers
+
+## Environment Variables
+
+- `LLM_BACKEND`: Backend selection — `ollama` (default) or `llamacpp`
+- `OLLAMA_URL`: Ollama server URL (default `http://localhost:11434`)
+- `OLLAMA_MODEL`: Model name (default `mistral:7b`)
+- `LLAMACPP_URL`: llama.cpp server URL (default `http://localhost:8080`)
+- `LLAMACPP_PARALLEL`: Number of parallel slots for concurrent civ narration (default `4`)
+- `LLAMACPP_N_PREDICT`: Max tokens per request (default `4096`)
+- `LLAMACPP_REPEAT_PENALTY`: Repetition penalty (default `1.3`)
+- `LLM_CALL_TIMEOUT` / `OLLAMA_CALL_TIMEOUT`: Max request duration in seconds (default `240` for Ollama, `600` for llama.cpp)
 
 ## Conventions
 

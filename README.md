@@ -1,4 +1,4 @@
-# Transcendence V6 BlackHole Version
+# Transcendence V7 llama.cpp Version
 
 A tiny, living universe you can **watch**.  
 Procedural star systems, emergent civilizations, and a Game Master AI narrating what unfolds.
@@ -13,7 +13,8 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 - Tracks stage progression with a continuous progress meter
 - Adds internal dynamics (elite_power, legitimacy, extraction_rate)
 - Uses a deterministic rules engine to drive events + consequences
-- Uses a local LLM (Ollama) only as a narrator/scribe (plain text, no JSON)
+- Uses a local LLM (Ollama or llama.cpp) only as a narrator/scribe (plain text, no JSON)
+- Supports parallel civ narration with llama.cpp backend (concurrent requests via slots)
 - Supports a fully deterministic No‑LLM mode with fallback narration
 - Adds constrained intent tokens (AGENDA/STANCE/NEWS) that only bias weights
 - Models exploration missions, beacons, and first contact events
@@ -32,7 +33,9 @@ It is closer to an **LLM experiment** than a traditional simulator or game — t
 ## Requirements
 
 - Python 3.10+
-- Ollama running locally (recommended)
+- One of the following LLM backends (optional, simulation works without LLM):
+  - **Ollama** running locally (default backend)
+  - **llama.cpp** server (`llama-server`) — supports parallel civ narration
 
 ## Quick start
 
@@ -42,6 +45,14 @@ python Transcendence.py
 
 The start screen lets you enable Ollama and pick a model without any exports.
 If Ollama is off (No LLM), the sim runs with deterministic fallback narration and intent proxies.
+
+To use llama.cpp instead of Ollama:
+
+```bash
+LLM_BACKEND=llamacpp LLAMACPP_URL=http://localhost:8080 python Transcendence.py
+```
+
+Set `LLAMACPP_PARALLEL` to control how many civ narrations run concurrently (default: 4).
 
 You can also open the standalone DB viewer:
 
